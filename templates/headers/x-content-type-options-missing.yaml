@@ -1,0 +1,15 @@
+id: header-xcto-missing
+info:
+  name: Missing X-Content-Type-Options
+  severity: medium
+  description: "MIME-sniffing can make the browser interpret a file as an executable script."
+  solution: "Add 'X-Content-Type-Options: nosniff'."
+  tags: header,hardening,mime
+requests:
+  - method: GET
+    path: "/"
+    matchers:
+      - type: contains
+        part: header
+        value: "X-Content-Type-Options"
+        not: true

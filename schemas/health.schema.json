@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-toolkit.local/schemas/v1/health.schema.json",
+  "title": "HealthReport",
+  "description": "Health response for /api/v1/healthz and /api/v1/readyz. By construction this document contains no credentials, connection strings, hostnames or filesystem paths. Version 1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["service", "version", "status", "checked_at"],
+  "properties": {
+    "service": { "type": "string", "maxLength": 100 },
+    "version": { "type": "string", "maxLength": 50 },
+    "api_version": { "type": "string", "maxLength": 20 },
+    "status": {
+      "type": "string",
+      "description": "Aggregate verdict. 'unknown' means nothing has been checked yet and is never treated as healthy.",
+      "enum": ["healthy", "degraded", "unavailable", "unknown"]
+    },
+    "ready": {
+      "type": "boolean",
+      "description": "Whether traffic should be routed here. False whenever a required dependency is not healthy."
+    },
+    "checked_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "python_version": { "type": "string", "maxLength": 20 },
+        "python_supported": { "type": "boolean" },
+        "os": { "type": "string", "maxLength": 50 },
+        "machine": { "type": "string", "maxLength": 50 },
+        "environment": { "type": "string", "enum": ["development", "test", "production"] },
+        "app_version": { "type": "string", "maxLength": 50 }
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status", "required"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Symbolic dependency name such as 'database'. Never a URL or host.",
+            "maxLength": 100
+          },
+          "status": { "type": "string", "enum": ["healthy", "degraded", "unavailable", "unknown"] },
+          "required": { "type": "boolean" },
+          "detail": {
+            "type": "string",
+            "description": "Failure category only, e.g. 'probe raised ConnectionError'. Never raw exception text.",
+            "maxLength": 200
+          }
+        }
+      }
+    },
+    "engines": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "overall": { "type": "string", "enum": ["healthy", "degraded", "unavailable", "unknown"] },
+        "available": { "type": "array", "items": { "type": "string", "maxLength": 100 }, "maxItems": 100 },
+        "count": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

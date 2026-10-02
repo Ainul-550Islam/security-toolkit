@@ -1,0 +1,25 @@
+id: cve-2024-4577-php
+info:
+  name: CVE-2024-4577 — PHP-CGI argument injection (Windows)
+  severity: high
+  description: "PHP 8.1 < 8.1.29, 8.2 < 8.2.20, 8.3 < 8.3.8 on Windows (Apache/php-cgi) allow argument injection → RCE."
+  solution: "Upgrade PHP to 8.1.29 / 8.2.20 / 8.3.8 or later, or move to php-fpm without CGI."
+  tags: cve,php,version,rce
+  reference: "https://nvd.nist.gov/vuln/detail/CVE-2024-4577"
+requests:
+  - method: GET
+    path: "/"
+    extractors:
+      - name: php_version
+        part: header
+        regex: 'PHP/([0-9]+\.[0-9]+\.[0-9]+)'
+    matchers:
+      - type: version
+        regex: "{{php_version}}"
+        comparison: lte
+        version: "8.3.8"
+        condition: and
+      - type: version
+        regex: "{{php_version}}"
+        comparison: gte
+        version: "8.1.0"

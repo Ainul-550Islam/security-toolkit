@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-toolkit.local/schemas/v1/finding.schema.json",
+  "title": "Finding",
+  "description": "One defensive assessment result produced by a scanner in any language. Version 1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["rule_id", "title", "severity"],
+  "properties": {
+    "rule_id": {
+      "type": "string",
+      "description": "Stable identifier of the rule that produced the finding.",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$"
+    },
+    "title": {
+      "type": "string",
+      "description": "Short human-readable summary.",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["info", "low", "medium", "high", "critical"]
+    },
+    "description": {
+      "type": "string",
+      "description": "What was observed and why it matters.",
+      "maxLength": 8192,
+      "default": ""
+    },
+    "location": {
+      "type": "string",
+      "description": "Workspace-relative location, e.g. 'config/app.yaml:12'. Absolute host paths must not be published.",
+      "maxLength": 2048,
+      "default": ""
+    },
+    "remediation": {
+      "type": "string",
+      "description": "Recommended fix.",
+      "maxLength": 8192,
+      "default": ""
+    },
+    "scanner": {
+      "type": "string",
+      "description": "Name of the scanner that produced the finding.",
+      "maxLength": 200,
+      "default": ""
+    },
+    "detected_at": {
+      "type": "string",
+      "description": "UTC detection instant, RFC 3339 with a trailing 'Z'.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "evidence_excerpt": {
+      "type": "string",
+      "description": "Short redacted excerpt. Secret material discovered by a secret-detection scanner MUST be masked before it reaches this field.",
+      "maxLength": 512,
+      "default": ""
+    },
+    "metadata": {
+      "type": "object",
+      "maxProperties": 64,
+      "default": {}
+    }
+  }
+}

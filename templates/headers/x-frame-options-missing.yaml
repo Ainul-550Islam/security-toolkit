@@ -1,0 +1,15 @@
+id: header-xfo-missing
+info:
+  name: Missing X-Frame-Options (clickjacking)
+  severity: medium
+  description: "The page can be embedded in a hidden iframe (clickjacking/phishing)."
+  solution: "Add 'X-Frame-Options: DENY' (or SAMEORIGIN) or a CSP frame-ancestors directive."
+  tags: header,clickjacking,hardening
+requests:
+  - method: GET
+    path: "/"
+    matchers:
+      - type: contains
+        part: header
+        value: "X-Frame-Options"
+        not: true

@@ -1,0 +1,15 @@
+id: header-referrer-policy-missing
+info:
+  name: Missing Referrer-Policy
+  severity: low
+  description: "Full URLs (including tokens in query strings) can leak to third-party origins via the Referer header."
+  solution: "Add 'Referrer-Policy: strict-origin-when-cross-origin' (or stricter)."
+  tags: header,privacy,hardening
+requests:
+  - method: GET
+    path: "/"
+    matchers:
+      - type: contains
+        part: header
+        value: "Referrer-Policy"
+        not: true

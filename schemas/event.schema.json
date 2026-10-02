@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://security-toolkit.local/schemas/v1/event.schema.json",
+  "title": "TelemetryEvent",
+  "description": "Canonical cross-language event emitted by Python, Rust and C++ components. Version 1. Additive changes only within a major schema version; a breaking change requires a new $id path and a new schema_version value.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "schema_version", "event_type", "kind", "severity", "source", "timestamp"],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "description": "Unique identifier for this event, generated with a CSPRNG or a deterministic UUIDv5.",
+      "minLength": 8,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]{8,64}$"
+    },
+    "schema_version": {
+      "type": "string",
+      "description": "Major version of this schema. '1' for all draft-2020-12 v1 events.",
+      "enum": ["1"]
+    },
+    "event_type": {
+      "type": "string",
+      "description": "Dotted event name, e.g. 'engine.registered'.",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*$"
+    },
+    "kind": {
+      "type": "string",
+      "description": "Coarse category controlling routing and retention.",
+      "enum": ["audit", "metric", "health", "diagnostic", "security"]
+    },
+    "severity": {
+      "type": "string",
+      "description": "Impact level. 'info' for non-security events.",
+      "enum": ["info", "low", "medium", "high", "critical"]
+    },
+    "source": {
+      "type": "string",
+      "description": "Component that produced the event, e.g. 'services.engine_registry'. Never a hostname or a file path.",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "tenant_id": {
+      "type": "string",
+      "description": "Owning tenant/organisation. Empty string for platform-level events.",
+      "maxLength": 100,
+      "default": ""
+    },
+    "correlation_id": {
+      "type": "string",
+      "description": "Trace identifier linking related events across languages and services.",
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]{0,64}$",
+      "default": ""
+    },
+    "timestamp": {
+      "type": "string",
+      "description": "UTC instant in RFC 3339 form, always ending in 'Z'. Local times and naive timestamps are invalid.",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Additional non-sensitive context. Credential-like keys are rejected by the producer; this channel must never carry secret material.",
+      "maxProperties": 64,
+      "default": {}
+    }
+  }
+}

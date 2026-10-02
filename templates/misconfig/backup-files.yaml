@@ -1,0 +1,20 @@
+id: misconfig-backup-files
+info:
+  name: Backup / database files publicly downloadable
+  severity: high
+  description: "Backup archives or database dumps are reachable over HTTP — this can expose the entire database and application code."
+  solution: "Remove backups from the web root; store them off-server or in private storage (S3 private bucket). Block .sql/.zip/.bak access at the server."
+  tags: misconfig,exposure,backup
+  reference: "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/"
+requests:
+  - method: GET
+    path:
+      - "/backup.zip"
+      - "/db.sql"
+      - "/database.sql"
+      - "/dump.sql"
+      - "/config.php.bak"
+      - "/wp-config.php.bak"
+    matchers:
+      - type: status
+        value: 200

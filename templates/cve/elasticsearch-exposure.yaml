@@ -1,0 +1,15 @@
+id: misconfig-elasticsearch-open
+info:
+  name: Elasticsearch publicly accessible (data exposure)
+  severity: high
+  description: "A publicly exposed Elasticsearch cluster leaks indices, documents and can allow data destruction (CVE-2015-1427 class RCE on old versions)."
+  solution: "Do not expose ES to the internet: bind to private network, enable authentication (security features), and firewall the port."
+  tags: misconfig,elasticsearch,databreach
+  reference: "https://www.elastic.co/guide/en/elasticsearch/reference/current/security-minimal-setup.html"
+requests:
+  - method: GET
+    path: "/"
+    matchers:
+      - type: contains
+        part: body
+        value: "You Know, for Search"

@@ -1,0 +1,12 @@
+# Runtime dependencies for security-toolkit.
+#
+# INTENTIONALLY EMPTY. The runtime uses the Python standard library only.
+#
+# This is a deliberate security property, not an omission: every third-party
+# package is code executing with the toolkit's privileges and is a supply-chain
+# attack surface. A new runtime dependency requires a written justification in
+# docs/SECURITY_MODEL.md, a pinned version, and a review of its transitive
+# tree.
+#
+# Development and test tooling belongs in requirements-dev.txt and is never
+# installed into a production image.

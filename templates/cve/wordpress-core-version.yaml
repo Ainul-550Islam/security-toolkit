@@ -1,0 +1,20 @@
+id: info-wordpress-core-version
+info:
+  name: WordPress version disclosure (check known-vulnerable ranges)
+  severity: low
+  description: "The WordPress generator meta tag reveals the core version. Old versions are associated with hundreds of known CVEs (e.g. core < 6.6.2 had critical plugin-agnostic flaws)."
+  solution: "Keep WordPress core, themes and plugins updated; remove generator meta tags (security hardening plugin)."
+  tags: cve,wordpress,cms,version
+  reference: "https://wordpress.org/about/security/"
+requests:
+  - method: GET
+    path: "/"
+    extractors:
+      - name: wp_version
+        part: body
+        regex: 'wp-content/plugins.*|name="generator" content="WordPress ([0-9]+\.[0-9]+(?:\.[0-9]+)?)'
+    matchers:
+      - type: version
+        regex: "{{wp_version}}"
+        comparison: lt
+        version: "6.6.2"

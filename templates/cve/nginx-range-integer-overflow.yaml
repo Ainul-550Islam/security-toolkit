@@ -1,0 +1,25 @@
+id: cve-2017-7529-nginx
+info:
+  name: CVE-2017-7529 — nginx range filter integer overflow
+  severity: high
+  description: "nginx 0.5.6 through 1.13.2 are vulnerable to an integer overflow in the range filter, allowing cache poisoning and sensitive data disclosure."
+  solution: "Upgrade nginx to 1.13.3+/1.12.1+."
+  tags: cve,nginx,version
+  reference: "https://nvd.nist.gov/vuln/detail/CVE-2017-7529"
+requests:
+  - method: GET
+    path: "/"
+    extractors:
+      - name: nginx_version
+        part: header
+        regex: 'nginx/([0-9]+\.[0-9]+\.[0-9]+)'
+    matchers:
+      - type: version
+        regex: "{{nginx_version}}"
+        comparison: gte
+        version: "0.5.6"
+        condition: and
+      - type: version
+        regex: "{{nginx_version}}"
+        comparison: lte
+        version: "1.13.2"

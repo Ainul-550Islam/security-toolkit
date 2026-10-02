@@ -1,0 +1,13 @@
+# Development and CI tooling ONLY. Never install these in production.
+#
+# Separated from requirements.txt so a production image contains no linters,
+# test frameworks or their transitive dependencies.
+
+# Static type checking of the foundation packages (see [tool.mypy]).
+mypy>=1.8,<2.0
+
+# Linting, import hygiene and flake8-bandit security rules (see [tool.ruff]).
+ruff>=0.4,<1.0
+
+# NOTE: the test suite itself requires nothing beyond the standard library --
+# it runs under `python3 -m unittest` and `python3 tests/run_tests.py`.

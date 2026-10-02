@@ -1,0 +1,20 @@
+id: api9-swagger-exposure
+info:
+  name: Exposed API documentation (Swagger/OpenAPI)
+  severity: medium
+  description: "Swagger UI or the OpenAPI spec is publicly reachable — it maps every endpoint, parameter and schema, simplifying targeted attacks."
+  solution: "Restrict documentation endpoints to authenticated users or internal networks in production."
+  tags: api,exposure,swagger,openapi
+  reference: "https://owasp.org/API-Security/editions/2023/en/0x11-t10/"
+requests:
+  - method: GET
+    path:
+      - "/swagger-ui/index.html"
+      - "/swagger-ui/"
+      - "/swagger.json"
+      - "/openapi.json"
+      - "/api-docs"
+    matchers:
+      - type: regex
+        part: body
+        pattern: '(?i)(swagger|openapi|"swagger":"|"openapi":)'

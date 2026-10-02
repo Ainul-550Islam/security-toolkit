@@ -1,0 +1,20 @@
+id: info-jenkins-version
+info:
+  name: Jenkins version disclosure
+  severity: low
+  description: "Jenkins login page exposes the exact version. Vulnerable versions are regularly targeted (CVE-2024-23897 arbitrary file read via CLI)."
+  solution: "Update Jenkins; disable anonymous access to the script console; consider restricting access with an authenticating reverse proxy."
+  tags: cve,jenkins,ci,version
+  reference: "https://www.jenkins.io/security/advisories/"
+requests:
+  - method: GET
+    path: "/login"
+    extractors:
+      - name: jenkins_version
+        part: body
+        regex: 'Jenkins ver\. ([0-9]+\.[0-9]+(?:\.[0-9]+)?)'
+    matchers:
+      - type: version
+        regex: "{{jenkins_version}}"
+        comparison: lte
+        version: "2.440.3"

@@ -1,0 +1,19 @@
+[package]
+name = "engine_core"
+description = "Memory-safe foundation primitives for the security toolkit. Pure computation only: no network, no filesystem, no process execution."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "engine_core"
+# rlib only for PART 01. A cdylib is added when the FFI bridge lands, so no
+# artifact exists that claims a Python binding that has not been written.
+crate-type = ["rlib"]
+
+# No dependencies. Every added crate expands the supply-chain surface and must
+# be justified in docs/SECURITY_MODEL.md before it is introduced.
+[dependencies]
+
+[dev-dependencies]

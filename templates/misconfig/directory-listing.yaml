@@ -1,0 +1,15 @@
+id: misconfig-directory-listing
+info:
+  name: Directory listing enabled
+  severity: medium
+  description: "The web server returns an index of directory contents, exposing the full folder structure and file names."
+  solution: "Disable directory listing (nginx: autoindex off; Apache: Options -Indexes; IIS: remove Directory Browsing)."
+  tags: misconfig,exposure
+  reference: "https://owasp.org/www-community/vulnerabilities/Information_Exposure_through_Directory_Listing"
+requests:
+  - method: GET
+    path: "/"
+    matchers:
+      - type: regex
+        part: body
+        pattern: '(?i)(Index of /|Directory listing for|\[DIR\])'

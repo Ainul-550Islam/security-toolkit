@@ -1,0 +1,19 @@
+id: cve-2021-44228-log4shell-detection
+info:
+  name: CVE-2021-44228 — Log4Shell environment check
+  severity: critical
+  description: "Log4Shell (Log4j 2.0-2.14.1) allowed unauthenticated RCE via JNDI lookups — the most-exploited CVE of the 2020s. This template only confirms whether the target exposes markers consistent with an affected Java stack; exploit validation requires controlled out-of-band testing."
+  solution: "Upgrade Log4j to 2.17.1+ (or 2.12.4/2.3.2 for legacy); remove JndiLookup class; update every dependent component (Spring Boot, Elasticsearch, Apache Solr, etc.)."
+  tags: cve,log4j,java,rce
+  reference: "https://nvd.nist.gov/vuln/detail/CVE-2021-44228"
+requests:
+  - method: GET
+    path: "/"
+    extractors:
+      - name: java_stack
+        part: header
+        regex: 'X-Powered-By.*(Servlet|Tomcat|Java)|Server:.*(Jetty|Tomcat|WildFly)'
+    matchers:
+      - type: regex
+        part: header
+        pattern: '(?i)(x-powered-by:.*(servlet|tomcat|java)|server:.*(jetty|tomcat|wildfly))'

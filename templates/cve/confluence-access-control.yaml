@@ -1,0 +1,19 @@
+id: cve-2023-22515-confluence
+info:
+  name: CVE-2023-22515 — Confluence broken access control
+  severity: critical
+  description: "Atlassian Confluence Data Center/Server < 8.5.1 (and 8.6.0, 8.5.x) allow creation of admin accounts without auth — mass-exploited within days."
+  solution: "Upgrade to patched version (8.5.1+, 8.6.1+); restrict access to the instance; check for unexpected admin users."
+  tags: cve,confluence,atlassian,access-control
+  reference: "https://nvd.nist.gov/vuln/detail/CVE-2023-22515"
+requests:
+  - method: GET
+    path: "/server-info.action"
+    matchers:
+      - type: contains
+        part: body
+        value: "Atlassian Confluence"
+    extractors:
+      - name: confluence_version
+        part: body
+        regex: 'Atlassian Confluence ([0-9]+\.[0-9]+\.[0-9]+)'

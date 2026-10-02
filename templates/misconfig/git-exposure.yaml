@@ -1,0 +1,15 @@
+id: misconfig-git-exposure
+info:
+  name: Exposed Git repository
+  severity: critical
+  description: "Public access to /.git/ lets an attacker download the full source code, commit history and possibly embedded credentials."
+  solution: "Block access to dot-directories at the web server (nginx: location ~ /\.git { deny all; } / Apache: RedirectMatch 404 /\.git). Remove the folder from the document root entirely."
+  tags: misconfig,exposure,git
+  reference: "https://owasp.org/www-community/vulnerabilities/Information_Exposure_through_Directory_Listing"
+requests:
+  - method: GET
+    path: "/.git/HEAD"
+    matchers:
+      - type: contains
+        part: body
+        value: "ref: refs/"

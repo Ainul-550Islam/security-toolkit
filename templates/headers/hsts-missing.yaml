@@ -1,0 +1,15 @@
+id: header-hsts-missing
+info:
+  name: Missing HSTS (Strict-Transport-Security)
+  severity: high
+  description: "Without HSTS, browsers can be downgraded to plain HTTP (SSL-stripping)."
+  solution: "Add 'Strict-Transport-Security: max-age=31536000; includeSubDomains; preload' on all HTTPS responses."
+  tags: header,tls,hardening
+requests:
+  - method: GET
+    path: "/"
+    matchers:
+      - type: contains
+        part: header
+        value: "Strict-Transport-Security"
+        not: true

@@ -1,0 +1,17 @@
+id: api9-graphql-endpoint
+info:
+  name: GraphQL endpoint reachable (check introspection)
+  severity: low
+  description: "A GraphQL endpoint responds to queries. If introspection is enabled, the full schema leaks."
+  solution: "Disable introspection in production ('IntrospectionQuery' should be rejected) and enforce query depth/complexity limits."
+  tags: api,graphql,exposure
+  reference: "https://owasp.org/API-Security/editions/2023/en/0x11-t10/"
+requests:
+  - method: GET
+    path:
+      - "/graphql"
+      - "/graphiql"
+      - "/api/graphql"
+    matchers:
+      - type: status
+        value: [200, 400]

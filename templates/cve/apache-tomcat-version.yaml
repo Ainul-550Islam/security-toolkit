@@ -1,0 +1,20 @@
+id: info-apache-tomcat-version
+info:
+  name: Apache Tomcat version disclosure
+  severity: low
+  description: "Tomcat error pages expose the version. Known RCEs include CVE-2023-28709 (session persistence deserialization) affecting 8.5.x/9.x/10.x before patch."
+  solution: "Upgrade Tomcat to the latest patch; customize error pages (Custom ErrorPages) to hide versions; remove version from Server header on the AJP/HTTP connector."
+  tags: cve,tomcat,java,version
+  reference: "https://tomcat.apache.org/security.html"
+requests:
+  - method: GET
+    path: "/"
+    extractors:
+      - name: tomcat_version
+        part: header
+        regex: 'Apache-Coyote/([0-9]+(?:\.[0-9]+){1,2})'
+    matchers:
+      - type: version
+        regex: "{{tomcat_version}}"
+        comparison: lt
+        version: "10.1.0"

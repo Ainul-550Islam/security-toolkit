@@ -1,0 +1,16 @@
+id: misconfig-apache-server-status
+info:
+  name: Exposed Apache server-status / server-info
+  severity: medium
+  description: "Apache mod_status or mod_info is publicly accessible — reveals active requests, source IPs and server configuration."
+  solution: "Remove or restrict /server-status and /server-info to localhost/trusted IPs (Require local / Require ip 10.0.0.0/8)."
+  tags: misconfig,exposure,apache
+requests:
+  - method: GET
+    path:
+      - "/server-status"
+      - "/server-info"
+    matchers:
+      - type: regex
+        part: body
+        pattern: '(?i)(Apache Server Status|Apache/.* Server at|Server Version)'

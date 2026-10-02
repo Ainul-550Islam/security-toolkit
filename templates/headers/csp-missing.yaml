@@ -1,0 +1,15 @@
+id: header-csp-missing
+info:
+  name: Missing Content-Security-Policy
+  severity: medium
+  description: "Without CSP, a successful XSS can load and execute arbitrary scripts from anywhere."
+  solution: "Add a Content-Security-Policy starting with 'default-src self' and tighten directives step by step."
+  tags: header,xss,hardening
+requests:
+  - method: GET
+    path: "/"
+    matchers:
+      - type: contains
+        part: header
+        value: "Content-Security-Policy"
+        not: true

@@ -1,0 +1,18 @@
+id: misconfig-actuator-exposure
+info:
+  name: Exposed Spring Boot Actuator
+  severity: high
+  description: "Spring Boot actuator endpoints exposed without authentication can leak configuration, environment variables and route maps."
+  solution: "Disable actuator endpoints in production or protect them with authentication and network restrictions (management.endpoints.web.exposure.include=health only when needed)."
+  tags: misconfig,exposure,spring,api
+  reference: "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/"
+requests:
+  - method: GET
+    path: "/actuator"
+    matchers:
+      - type: status
+        value: 200
+    extractors:
+      - name: actuator_body
+        part: body
+        regex: '(_links|status|health)'

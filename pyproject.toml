@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "security-toolkit"
+version = "0.1.0"
+description = "Defensive security assessment and governance platform."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+# The runtime depends on the Python standard library only. Every dependency
+# added to a security tool is code that runs with the tool's privileges, so
+# additions must be justified in docs/SECURITY_MODEL.md before they land.
+dependencies = []
+
+[project.optional-dependencies]
+# Development tooling only. Never installed in production images.
+dev = [
+    "mypy>=1.8",
+    "ruff>=0.4",
+]
+
+[tool.setuptools]
+# Explicit package list: automatic discovery would sweep up tests/ and the
+# native/ trees.
+packages = ["core", "config", "interfaces", "services", "api", "api.v1"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["core", "config", "interfaces", "services", "api"]
+warn_return_any = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+strict_equality = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+# The legacy python/ package predates these boundaries and is migrated
+# incrementally; it is not type-checked yet.
+[[tool.mypy.overrides]]
+module = ["python.*"]
+ignore_errors = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["native", "build", "dist", ".venv"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "I",    # import sorting
+    "B",    # bugbear
+    "S",    # flake8-bandit: security checks
+    "UP",   # pyupgrade
+]
+ignore = [
+    "E501",  # line length is handled by the formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately use assert and construct deliberately bad inputs.
+"tests/*" = ["S101", "S105", "S106", "S108"]

@@ -1,0 +1,17 @@
+id: misconfig-phpmyadmin-exposure
+info:
+  name: Exposed phpMyAdmin
+  severity: high
+  description: "phpMyAdmin panel is publicly reachable — a common target for brute-force and known-CVE exploitation."
+  solution: "Remove phpMyAdmin from public-facing servers, restrict by IP, or require VPN/basic auth."
+  tags: misconfig,exposure,phpmyadmin
+  reference: "https://www.phpmyadmin.net/security/"
+requests:
+  - method: GET
+    path:
+      - "/phpmyadmin/"
+      - "/pma/"
+    matchers:
+      - type: contains
+        part: body
+        value: "phpmyadmin"

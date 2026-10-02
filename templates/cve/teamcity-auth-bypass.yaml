@@ -1,0 +1,20 @@
+id: cve-2023-42793-teamcity
+info:
+  name: CVE-2023-42793 — JetBrains TeamCity auth bypass (RCE)
+  severity: high
+  description: "TeamCity < 2023.05.4 allows authentication bypass leading to RCE — exploited heavily in the wild (ransomware groups)."
+  solution: "Upgrade TeamCity to 2023.05.4 or later, restrict admin UI exposure, add MFA."
+  tags: cve,teamcity,jetbrains,rce
+  reference: "https://nvd.nist.gov/vuln/detail/CVE-2023-42793"
+requests:
+  - method: GET
+    path: "/login.html"
+    extractors:
+      - name: teamcity_version
+        part: body
+        regex: 'TeamCity professional ([0-9]+\.[0-9]+(?:\.[0-9]+)?)'
+    matchers:
+      - type: version
+        regex: "{{teamcity_version}}"
+        comparison: lte
+        version: "2023.05.3"
