@@ -161,9 +161,10 @@ class SecurityBaselineHardcodedSecretTests(unittest.TestCase):
     #   to exercise Apple-style JWT signing in tests/test_identity.py. It
     #   guards no real system and is required for those tests to run offline.
     #
-    # data/.secutoolkit_webhook.key -- NOT source. It is generated at runtime
-    #   by python/notify.py into data/, which .gitignore excludes. It exists
-    #   in this working tree only because the suite has been run here.
+    # data/.secutoolkit_webhook.key -- historical legacy key material used
+    #   only to decrypt old notification-secret rows during AEAD migration.
+    #   The new implementation never generates this file; if present, it is
+    #   deployment data and must remain outside version control.
     KEY_FILE_ALLOWLIST = {
         "tests/fixtures/p8test.key",
     }

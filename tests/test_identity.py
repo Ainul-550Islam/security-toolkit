@@ -25,6 +25,7 @@ import threading
 import time
 import unittest
 import uuid
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 sys.path.insert(0, os.path.dirname(__file__))
@@ -173,6 +174,13 @@ class IdentityTestCase(unittest.TestCase):
     """Fresh database + services per test (isolation; no shared state)."""
 
     def setUp(self):
+        self._encryption_env = patch.dict(os.environ, {
+            "SECURITY_TOOLKIT_ENCRYPTION_ACTIVE_KEY_ID": "identity-test-key",
+            "SECURITY_TOOLKIT_ENCRYPTION_KEY_identity-test-key":
+                base64.b64encode(bytes(range(32))).decode("ascii"),
+        })
+        self._encryption_env.start()
+        self.addCleanup(self._encryption_env.stop)
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.tmp.close()
         self.svc = platform_service.PlatformService(self.tmp.name)

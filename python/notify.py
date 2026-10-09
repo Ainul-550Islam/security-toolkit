@@ -31,10 +31,23 @@ import os
 import re
 import socket
 import ssl
+import sys
 import time
+from typing import Any
 import urllib.error
 import urllib.parse
 import urllib.request
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from services.crypto import (
+    CryptoError,
+    CryptoNotConfigured,
+    CryptoService,
+    EncryptedValueError,
+)
 
 import errors
 import metrics
@@ -55,6 +68,45 @@ _SECRET_MIN_LEN = 8
 _ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,190}\.[A-Za-z]{2,24}$")
 _TS_TOLERANCE_SECONDS = 300
+
+
+def _safe_delivery_error(outcome: str, error: Any) -> str:
+    """Return a closed, client-safe delivery error; never retain provider text."""
+    try:
+        candidate = str(error or "")[:500]
+    except Exception:
+        candidate = ""
+    normalized = candidate.strip().lower()
+    if re.fullmatch(r"http [1-5][0-9]{2}", normalized):
+        return normalized
+    if normalized in {
+        "email transport not configured (no recipient)",
+        "email transport not configured (smtp adapter required — see docs)",
+    }:
+        return "email transport not configured"
+    if normalized == "recording provider failure":
+        return "recording provider failure"
+    if normalized == "unknown provider channel":
+        return "unknown provider channel"
+    if normalized == "webhook destination rejected":
+        return normalized
+    if normalized == "webhook redirect refused":
+        return normalized
+    if normalized == "webhook request timed out":
+        return normalized
+    if normalized == "webhook delivery failed":
+        return normalized
+    if normalized == "provider request timed out":
+        return normalized
+    if outcome == "invalid":
+        return "provider configuration rejected"
+    if outcome == "redirect":
+        return "provider redirect refused"
+    if outcome == "timeout":
+        return "provider request timed out"
+    if outcome == "skipped":
+        return "provider unavailable"
+    return "provider delivery failed"
 
 
 def _epoch(ts: str) -> float:
@@ -179,79 +231,137 @@ def verify_signature(secret: str, timestamp: str, body: bytes,
 # ---------------------------------------------------------------------------
 # Provider adapters (provider-neutral; no hard-coded external services)
 # ---------------------------------------------------------------------------
-_KEYFILE_NAME = ".secutoolkit_webhook.key"
-_KEYFILE_BYTES = 32
+_LEGACY_KEYFILE_NAME = ".secutoolkit_webhook.key"
+_LEGACY_KEY_BYTES = 32
+_LEGACY_MAX_BYTES = 1_048_576
+_LEGACY_HEX_RE = re.compile(r"^[0-9A-Fa-f]+$")
+_AEAD_PREFIX = "st-aesgcm:"
 
 
-# ---------------------------------------------------------------------------
-# Webhook secret at rest: NEVER stored plaintext. A local key file next to
-# the database (0600) seeds a scrypt-derived keystream used to encrypt the
-# secret before it is written. Not authenticated encryption (stdlib-only;
-# documented limitation) — deployments needing FIPS-grade protection mount
-# the secret through an external secrets manager and keep the key file in
-# the same protected store. The decrypted value is exposed ONLY through the
-# internal settings_get (signing path); every view/payload path masks it.
-# ---------------------------------------------------------------------------
-def _keyfile_path(db_path: str) -> str:
-    d = os.path.dirname(os.path.abspath(str(db_path) or "."))
-    return os.path.join(d, _KEYFILE_NAME)
+def _notification_secret_aad(org_id: str, project_id: str) -> str:
+    tenant = str(org_id or "")
+    project = str(project_id or "")
+    if not tenant or not project or ":" in tenant or ":" in project:
+        raise errors.ConfigurationError("notification_secret_context_invalid")
+    return f"notification-settings:webhook-secret:v1:{tenant}:{project}"
 
 
-def _load_or_make_key(db_path: str) -> bytes:
-    import secrets as _secrets
-    path = _keyfile_path(db_path)
+def _legacy_keyfile_path(db_path: str) -> str:
+    """Locate the historical local key solely for one-way data migration."""
+    directory = os.path.dirname(os.path.abspath(str(db_path) or "."))
+    return os.path.join(directory, _LEGACY_KEYFILE_NAME)
+
+
+def _load_legacy_key(db_path: str) -> bytes:
+    """Read a pre-existing legacy key; never create or replace one."""
+    path = _legacy_keyfile_path(db_path)
     try:
-        with open(path, "rb") as fh:
-            k = fh.read()
-        if len(k) == _KEYFILE_BYTES:
-            return k
-    except OSError:
-        pass
-    k = _secrets.token_bytes(_KEYFILE_BYTES)
-    try:
-        # create with restrictive permissions where the platform supports it
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(k)
-    except OSError:
-        env = os.environ.get("SECTOOLKIT_WEBHOOK_KEY", "")
-        if len(env) >= 32:
-            return hashlib.sha256(env.encode("utf-8")).digest()
+        with open(path, "rb") as handle:
+            key = handle.read(_LEGACY_KEY_BYTES + 1)
+    except FileNotFoundError:
+        legacy_environment_key = os.environ.get("SECTOOLKIT_WEBHOOK_KEY", "")
+        if legacy_environment_key:
+            return hashlib.sha256(legacy_environment_key.encode("utf-8")).digest()
         raise errors.ConfigurationError(
-            "webhook_key_unavailable: cannot create or read the local "
-            "webhook key file; set SECTOOLKIT_WEBHOOK_KEY (>=32 chars) in "
-            "read-only deployments")
-    return k
+            "legacy_webhook_key_unavailable: existing notification secret cannot be migrated"
+        ) from None
+    except OSError:
+        legacy_environment_key = os.environ.get("SECTOOLKIT_WEBHOOK_KEY", "")
+        if legacy_environment_key:
+            return hashlib.sha256(legacy_environment_key.encode("utf-8")).digest()
+        raise errors.ConfigurationError(
+            "legacy_webhook_key_unavailable: existing notification secret cannot be migrated"
+        ) from None
+    if len(key) != _LEGACY_KEY_BYTES:
+        raise errors.ConfigurationError(
+            "legacy_webhook_key_invalid: existing notification secret cannot be migrated"
+        )
+    return key
 
 
-def _keystream(key: bytes, n: int) -> bytes:
-    out = bytearray()
-    ctr = 0
-    while len(out) < n:
-        out += hashlib.sha256(key + ctr.to_bytes(4, "big")).digest()
-        ctr += 1
-    return bytes(out[:n])
+def _legacy_keystream(key: bytes, length: int) -> bytes:
+    """Reproduce the retired format for decrypt-only migration compatibility."""
+    output = bytearray()
+    counter = 0
+    while len(output) < length:
+        output.extend(hashlib.sha256(key + counter.to_bytes(4, "big")).digest())
+        counter += 1
+    return bytes(output[:length])
 
 
-def _encrypt_secret(secret: str, db_path: str) -> str:
+def _decrypt_legacy_xor(blob: str, db_path: str) -> str:
+    """Decrypt the unauthenticated historical format only for AEAD migration."""
+    if (
+        not isinstance(blob, str)
+        or not blob
+        or len(blob) % 2
+        or len(blob) > _LEGACY_MAX_BYTES * 2
+        or not _LEGACY_HEX_RE.fullmatch(blob)
+    ):
+        raise errors.ConfigurationError(
+            "legacy_webhook_ciphertext_invalid: migration is required"
+        )
+    try:
+        ciphertext = binascii.unhexlify(blob)
+        key = _load_legacy_key(db_path)
+        stream = _legacy_keystream(key, len(ciphertext))
+        plaintext = bytes(left ^ right for left, right in zip(ciphertext, stream))
+        return plaintext.decode("utf-8", "strict")
+    except (UnicodeDecodeError, ValueError, binascii.Error):
+        raise errors.ConfigurationError(
+            "legacy_webhook_migration_failed: secret could not be migrated"
+        ) from None
+
+
+def _encrypt_secret(
+    secret: str,
+    db_path: str,
+    associated_data: str = "notification:webhook-secret",
+) -> str:
+    """Compatibility helper backed only by the shared AES-GCM service."""
+    del db_path
     if not secret:
         return ""
-    key = _load_or_make_key(db_path)
-    raw = str(secret).encode("utf-8")
-    ks = _keystream(key, len(raw))
-    return binascii.hexlify(bytes(a ^ b for a, b in zip(raw, ks))).decode()
+    try:
+        return CryptoService().encrypt_text(
+            str(secret), associated_data=associated_data
+        )
+    except CryptoNotConfigured:
+        raise errors.ConfigurationError(
+            "notification_secret_encryption_unavailable"
+        ) from None
+    except EncryptedValueError:
+        raise errors.ValidationError(
+            "notification_secret_encryption_failed"
+        ) from None
+    except CryptoError:
+        raise errors.ConfigurationError(
+            "notification_secret_encryption_unavailable"
+        ) from None
 
 
-def _decrypt_secret(blob: str, db_path: str) -> str:
+def _decrypt_secret(
+    blob: str,
+    db_path: str,
+    associated_data: str = "notification:webhook-secret",
+) -> str:
+    """Decrypt current AEAD or read a legacy value for immediate migration."""
     if not blob:
         return ""
-    try:
-        raw = binascii.unhexlify(str(blob))
-    except (ValueError, binascii.Error):
-        return ""
-    key = _load_or_make_key(db_path)
-    ks = _keystream(key, len(raw))
-    return bytes(a ^ b for a, b in zip(raw, ks)).decode("utf-8", "replace")
+    if str(blob).startswith(_AEAD_PREFIX):
+        try:
+            return CryptoService().decrypt_text(
+                str(blob), associated_data=associated_data
+            )
+        except CryptoNotConfigured:
+            raise errors.ConfigurationError(
+                "notification_secret_decryption_unavailable"
+            ) from None
+        except EncryptedValueError:
+            raise errors.PersistenceError(
+                "notification_secret_authentication_failed"
+            ) from None
+    return _decrypt_legacy_xor(str(blob), db_path)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -269,9 +379,9 @@ class WebhookProvider:
         url = str(settings.get("webhook_url", "") or "")
         try:
             validate_webhook_url(url)
-        except errors.ValidationError as e:
+        except errors.ValidationError:
             return {"ok": False, "outcome": "invalid",
-                    "error": str(e)[:200]}
+                    "error": "webhook destination rejected"}
         secret = str(settings.get("webhook_secret", "") or "")
         body = json.dumps(redact.redact(payload), ensure_ascii=False,
                           separators=(",", ":")).encode("utf-8")
@@ -296,19 +406,22 @@ class WebhookProvider:
                 return {"ok": True, "outcome": "sent", "status": status,
                         "duration_ms": round((time.time() - started) * 1000, 1)}
         except urllib.error.HTTPError as e:  # includes refused redirects
+            redirect = e.code in (301, 302, 303, 307, 308)
             return {"ok": False,
-                    "outcome": "redirect" if e.code in (301, 302, 303, 307,
-                                                        308) else "failed",
-                    "error": f"http {e.code}", "status": int(e.code)}
+                    "outcome": "redirect" if redirect else "failed",
+                    "error": "webhook redirect refused" if redirect else f"http {e.code}",
+                    "status": int(e.code)}
         except (urllib.error.URLError, socket.timeout, TimeoutError,
-                ssl.SSLError, ConnectionError, OSError) as e:
-            kind = "timeout" if isinstance(e, (socket.timeout, TimeoutError)) \
-                else "failed"
-            return {"ok": False, "outcome": kind,
-                    "error": str(e)[:200]}
-        except Exception as e:
+                ssl.SSLError, ConnectionError, OSError) as exc:
+            timed_out = isinstance(exc, (socket.timeout, TimeoutError))
+            return {
+                "ok": False,
+                "outcome": "timeout" if timed_out else "failed",
+                "error": "webhook request timed out" if timed_out else "webhook delivery failed",
+            }
+        except Exception:
             return {"ok": False, "outcome": "failed",
-                    "error": str(e)[:200]}
+                    "error": "webhook delivery failed"}
 
 
 class EmailProvider:
@@ -373,7 +486,7 @@ class NotificationService:
 
     # ------------------------------------------------------- settings
     def settings_get(self, project_id: str) -> dict:
-        self.svc.project_require(project_id)
+        project = self.svc.project_require(project_id)
         rows = self.db.query(
             "SELECT * FROM notification_settings WHERE project_id=? LIMIT 1",
             (project_id,))
@@ -383,22 +496,73 @@ class NotificationService:
                     "webhook_url": "", "webhook_secret": "",
                     "has_secret": False}
         r = rows[0]
+        stored_secret = str(r.get("webhook_secret", "") or "")
+        context = _notification_secret_aad(project.org_id, project_id)
+        secret = _decrypt_secret(stored_secret, self.svc.db_path, context)
+        if stored_secret and not stored_secret.startswith(_AEAD_PREFIX):
+            migrated = _encrypt_secret(secret, self.svc.db_path, context)
+            changed = self.db.execute_affected(
+                "UPDATE notification_settings SET webhook_secret=?, updated_at=? "
+                "WHERE project_id=? AND webhook_secret=?",
+                (migrated, models.utcnow(), project_id, stored_secret),
+            )
+            if changed:
+                self.svc.audit(
+                    "notification.secret.migrated",
+                    object_type="project",
+                    object_id=project_id,
+                    org_id=project.org_id,
+                    project_id=project_id,
+                    actor="crypto:migration",
+                    metadata={"cipher_version": "v1"},
+                )
+            else:
+                latest = self.db.query(
+                    "SELECT webhook_secret FROM notification_settings "
+                    "WHERE project_id=? LIMIT 1",
+                    (project_id,),
+                )
+                if not latest or latest[0].get("webhook_secret") == stored_secret:
+                    raise errors.PersistenceError(
+                        "notification_secret_migration_conflict"
+                    )
+                secret = _decrypt_secret(
+                    str(latest[0].get("webhook_secret", "") or ""),
+                    self.svc.db_path,
+                    context,
+                )
         return {"project_id": project_id,
                 "email_enabled": bool(r.get("email_enabled")),
-                "email_to": redact.redact_text(str(r.get("email_to", ""))),
+                # Internal delivery configuration only. Public consumers must
+                # use settings_view(), which redacts endpoint values.
+                "email_to": str(r.get("email_to", "")),
                 "webhook_enabled": bool(r.get("webhook_enabled")),
-                "webhook_url": redact.redact_text(str(r.get("webhook_url", ""))),
+                "webhook_url": str(r.get("webhook_url", "")),
                 # internal only (signing); every view masks this key
-                "webhook_secret": _decrypt_secret(
-                    str(r.get("webhook_secret", "")), self.svc.db_path),
-                "has_secret": bool(r.get("webhook_secret", ""))}
+                "webhook_secret": secret,
+                "has_secret": bool(stored_secret)}
 
     def settings_view(self, project_id: str) -> dict:
-        s = self.settings_get(project_id)
-        s.pop("webhook_secret", None)
-        s["email_to"] = redact.redact_text(s.get("email_to", ""))
-        s["webhook_url"] = redact.redact_text(s.get("webhook_url", ""))
-        return s
+        self.svc.project_require(project_id)
+        rows = self.db.query(
+            "SELECT email_enabled, email_to, webhook_enabled, webhook_url, "
+            "webhook_secret FROM notification_settings WHERE project_id=? "
+            "LIMIT 1",
+            (project_id,),
+        )
+        if not rows:
+            return {"project_id": project_id, "email_enabled": False,
+                    "email_to": "", "webhook_enabled": False,
+                    "webhook_url": "", "has_secret": False}
+        row = rows[0]
+        return {
+            "project_id": project_id,
+            "email_enabled": bool(row.get("email_enabled")),
+            "email_to": redact.redact_text(str(row.get("email_to", ""))),
+            "webhook_enabled": bool(row.get("webhook_enabled")),
+            "webhook_url": redact.redact_text(str(row.get("webhook_url", ""))),
+            "has_secret": bool(row.get("webhook_secret", "")),
+        }
 
     def settings_set(self, project_id: str, *, email_enabled: bool = False,
                      email_to: str = "", webhook_enabled: bool = False,
@@ -420,16 +584,25 @@ class NotificationService:
             raise errors.ValidationError(
                 "settings_rejected: webhook secret must be at least "
                 f"{_SECRET_MIN_LEN} characters")
+        if len(secret.encode("utf-8")) > 4096:
+            raise errors.ValidationError("settings_rejected: webhook secret is too large")
         existing = self.db.query(
             "SELECT * FROM notification_settings WHERE project_id=? LIMIT 1",
             (project_id,))
-        # store the secret ENCRYPTED at rest (never plaintext); the internal
-        # settings_get path decrypts it for HMAC signing only. keep_secret
-        # carries the existing ciphertext through unchanged.
+        context = _notification_secret_aad(project.org_id, project_id)
+        legacy_migrated = False
         if not secret and keep_secret and existing:
-            stored_secret = str(existing[0].get("webhook_secret", "")) or ""
+            stored_secret = str(existing[0].get("webhook_secret", "") or "")
+            if stored_secret and not stored_secret.startswith(_AEAD_PREFIX):
+                legacy_plaintext = _decrypt_secret(
+                    stored_secret, self.svc.db_path, context
+                )
+                stored_secret = _encrypt_secret(
+                    legacy_plaintext, self.svc.db_path, context
+                )
+                legacy_migrated = True
         else:
-            stored_secret = _encrypt_secret(secret, self.svc.db_path)
+            stored_secret = _encrypt_secret(secret, self.svc.db_path, context)
         now = models.utcnow()
         with self.db.transaction() as conn:
             conn.execute(
@@ -453,15 +626,31 @@ class NotificationService:
                                  "webhook_enabled": bool(webhook_enabled),
                                  "webhook_url": redact.redact_text(
                                      str(webhook_url)[:200])})
+        if legacy_migrated:
+            self.svc.audit(
+                "notification.secret.migrated",
+                object_type="project",
+                object_id=project_id,
+                org_id=project.org_id,
+                project_id=project_id,
+                actor="crypto:migration",
+                metadata={"cipher_version": "v1"},
+            )
         return self.settings_view(project_id)
 
     # ------------------------------------------------------ dispatch
     def dispatch_alert(self, alert_id: str, occurrence_event_id: str,
-                       rule: dict, *, actor: str = "scheduler") -> int:
-        """Create (idempotent) pending notifications for configured channels.
-        Returns the number of notification rows created."""
-        rows = self.db.query("SELECT * FROM alerts WHERE id=? LIMIT 1",
-                             (alert_id,))
+                       rule: dict, *, actor: str = "scheduler",
+                       org_id: str | None = None) -> int:
+        """Create idempotent pending notifications for one alert tenant."""
+        if org_id:
+            rows = self.db.query(
+                "SELECT * FROM alerts WHERE id=? AND org_id=? LIMIT 1",
+                (alert_id, org_id),
+            )
+        else:
+            rows = self.db.query("SELECT * FROM alerts WHERE id=? LIMIT 1",
+                                 (alert_id,))
         if not rows:
             return 0
         alert = rows[0]
@@ -487,48 +676,66 @@ class NotificationService:
                      ""))
                 if cur.rowcount == 1:
                     created += 1
-        self.process_pending(limit=10)
+        self.process_pending(limit=10, org_id=str(alert["org_id"]))
         return created
 
     def process_pending(self, *, limit: int = 10,
-                        now: str | None = None) -> int:
-        """Attempt due pending notifications (deterministic order)."""
+                        now: str | None = None,
+                        org_id: str | None = None) -> int:
+        """Attempt due pending notifications; optionally constrain to a tenant."""
         now = now or models.utcnow()
+        tenant_clause = " AND org_id=?" if org_id else ""
+        params: tuple = (now, org_id, min(max(int(limit), 1), 100)) if org_id else (
+            now, min(max(int(limit), 1), 100)
+        )
         rows = self.db.query(
             "SELECT * FROM notifications WHERE status='pending' AND "
-            "(next_retry_at='' OR next_retry_at<=?) ORDER BY created_at, id "
-            "LIMIT ?", (now, min(max(int(limit), 1), 100)))
+            "(next_retry_at='' OR next_retry_at<=?)" + tenant_clause +
+            " ORDER BY created_at, id LIMIT ?", params)
         done = 0
         for n in rows:
             if self._attempt(dict(n)):
                 done += 1
         return done
 
-    def retry_due(self, *, limit: int = 20, now: str | None = None) -> int:
-        return self.process_pending(limit=limit, now=now)
+    def retry_due(self, *, limit: int = 20, now: str | None = None,
+                  org_id: str | None = None) -> int:
+        return self.process_pending(limit=limit, now=now, org_id=org_id)
 
     def retry_manual(self, notification_id: str, *,
-                     actor: str = "cli") -> dict:
+                     actor: str = "cli",
+                     org_id: str | None = None) -> dict:
         self._acquire(f"notify:retry:{actor}",
                       NOTIFY_RETRY_LIMIT, NOTIFY_RETRY_WINDOW)
-        rows = self.db.query("SELECT * FROM notifications WHERE id=? LIMIT 1",
-                             (notification_id,))
+        if org_id:
+            rows = self.db.query(
+                "SELECT * FROM notifications WHERE id=? AND org_id=? LIMIT 1",
+                (notification_id, org_id),
+            )
+        else:
+            rows = self.db.query("SELECT * FROM notifications WHERE id=? LIMIT 1",
+                                 (notification_id,))
         if not rows:
             raise errors.NotFoundError("notification not found")
         n = rows[0]
         if n["status"] in ("sent",):
             raise errors.LifecycleError(
                 "validation_rejected: already delivered")
+        update_tenant_clause = " AND org_id=?" if org_id else ""
+        update_params = (models.utcnow(), notification_id, org_id) if org_id else (
+            models.utcnow(), notification_id
+        )
         self.db.execute(
             "UPDATE notifications SET status='pending', next_retry_at='', "
-            "updated_at=? WHERE id=? AND status<>'sent'",
-            (models.utcnow(), notification_id))
+            "updated_at=? WHERE id=? AND status<>'sent'" + update_tenant_clause,
+            update_params,
+        )
         self.svc.audit("notification.retried", object_type="notification",
                        object_id=notification_id, project_id=n["project_id"],
                        org_id=n["org_id"], actor=actor,
                        metadata={"attempts": n["attempts"]})
-        self.process_pending(limit=1)
-        return self.notification_view(notification_id)
+        self.process_pending(limit=1, org_id=org_id)
+        return self.notification_view(notification_id, org_id=org_id)
 
     # ---------------------------------------------------------- attempt
     def _attempt(self, n: dict) -> bool:
@@ -541,15 +748,23 @@ class NotificationService:
             return True
         payload = self._payload_for(n)
         started = time.time()
-        result = provider.send(self._settings_for(n["project_id"]), payload)
+        try:
+            result = provider.send(self._settings_for(n["project_id"]), payload)
+        except Exception:
+            result = {"ok": False, "outcome": "failed", "error": ""}
         duration = round((time.time() - started) * 1000, 1)
+        if not isinstance(result, dict):
+            result = {"ok": False, "outcome": "failed", "error": ""}
         attempt = int(n.get("attempts") or 0) + 1
-        outcome = str(result.get("outcome", "failed"))
-        error = redact.redact_text(str(result.get("error", "")))[:]
+        outcome_value = result.get("outcome", "failed")
+        outcome = outcome_value if isinstance(outcome_value, str) and outcome_value in models.NOTIFICATION_OUTCOMES else "failed"
+        if outcome == "sent" and result.get("ok") is not True:
+            outcome = "failed"
+        error = _safe_delivery_error(outcome, result.get("error", ""))
         # every attempt advances the counter (also on terminal outcomes)
         self.db.execute("UPDATE notifications SET attempts=? WHERE id=?",
                         (attempt, n["id"]))
-        if result.get("ok"):
+        if result.get("ok") is True:
             self._record_attempt(n, "sent", "", duration)
             self.db.execute(
                 "UPDATE notifications SET status='sent', attempts=?, "
@@ -636,9 +851,16 @@ class NotificationService:
                            notification_id))
 
     # ------------------------------------------------------------- reads
-    def notification_view(self, notification_id: str) -> dict:
-        rows = self.db.query("SELECT * FROM notifications WHERE id=? LIMIT 1",
-                             (notification_id,))
+    def notification_view(self, notification_id: str, *,
+                          org_id: str | None = None) -> dict:
+        if org_id:
+            rows = self.db.query(
+                "SELECT * FROM notifications WHERE id=? AND org_id=? LIMIT 1",
+                (notification_id, org_id),
+            )
+        else:
+            rows = self.db.query("SELECT * FROM notifications WHERE id=? LIMIT 1",
+                                 (notification_id,))
         if not rows:
             raise errors.NotFoundError("notification not found")
         v = dict(rows[0])

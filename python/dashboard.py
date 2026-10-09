@@ -33,9 +33,11 @@ import argparse
 import hmac
 import ipaddress
 import json
+import logging
 import os
 import re
 import sys
+import uuid
 import threading
 import time
 import urllib.parse
@@ -48,6 +50,11 @@ SEV_COLORS = {"Critical": "#ff3b5c", "High": "#ff8a3d", "Medium": "#ffd23d",
               "Low": "#4da3ff", "Info": "#7d8590"}
 STATUSES = ["open", "in-progress", "mitigated", "verified"]
 SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
+REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,95}$")
+MAX_DASHBOARD_TOKEN_LENGTH = 4096
+MAX_STATUS_NOTE_LENGTH = 1024
+MAX_EXPORT_BYTES = 4_000_000
+DASHBOARD_TOKEN_ENV = "SECURITY_TOOLKIT_DASHBOARD_TOKEN"
 
 HTML_HEAD = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -135,14 +142,17 @@ function donut(segs,size){ // segs: [{k,v}]
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
   '>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function sevChip(sev){return `<span class="chip" style="background:${COLORS[sev]||'#888'}">${esc(sev)}</span>`;}
-function g(){const m=location.search.match(/[?&]t=([^&]+)/);return m?m[1]:'';}
-async function api(u){const q=g();const r=await fetch(u+(u.includes('?')?'&':'?')+'t='+q);
+async function api(u){const r=await fetch(u,{credentials:'same-origin',cache:'no-store',
+  headers:{'Accept':'application/json'}});
   if(r.status===401){showLogin();throw new Error('unauthorized');}
-  if(!r.ok) throw new Error('HTTP '+r.status); return r.json();}
+  if(!r.ok) throw new Error('request failed'); return r.json();}
 function showLogin(){document.body.innerHTML='<div class="login"><h2>Token required</h2>'+
   '<input id="tk" placeholder="access token"><br><br><button class="btn" onclick="setTok()">Unlock</button></div>';}
 function setTok(){const t=document.getElementById('tk').value;
-  document.cookie='sess='+encodeURIComponent(t)+';path=/';location.reload();}
+  if(!t||t.length>4096)return;
+  const secure=location.protocol==='https:'?';Secure':'';
+  document.cookie='sess='+encodeURIComponent(t)+';Path=/;SameSite=Strict'+secure;
+  location.assign(location.pathname);}
 </script>
 """
 
@@ -1263,7 +1273,7 @@ def load_phase12_snapshot(db_path, org_filter="", *, limit=300):
                     f"SELECT error, created_at FROM federation_imports "
                     f"{rej_clause} ORDER BY created_at DESC LIMIT 20", args):
                 snap["rejected_recent"].append(
-                    {"error": str(r["error"] or "")[:80],
+                    {"error": safe_stored_error(r["error"]),
                      "created_at": str(r["created_at"])})
             for r in conn.execute(
                     f"SELECT status, COUNT(*) AS n FROM jobs {clause}"
@@ -1350,7 +1360,7 @@ def load_phase12_api(db_path, org_filter="", *, limit=200):
                     f"{clause} ORDER BY created_at DESC LIMIT ?",
                     args + [limit]):
                 d = dict(r)
-                d["error"] = str(d.get("error") or "")[:120]
+                d["error"] = safe_stored_error(d.get("error"))
                 out["imports"].append(d)
             for r in conn.execute(
                     f"SELECT id, project_id, name, kind, endpoint_url, "
@@ -2395,23 +2405,42 @@ def devsecops_page(snap) -> str:
 
 # ---------------------------------------------------------------------------
 # HTTP server
-def check_access(token: str, header_t: str, cookie_t: str, query_t: str) -> bool:
+def check_access(
+    token: str,
+    header_t: str,
+    cookie_t: str,
+    query_t: str = "",
+    *,
+    allow_legacy_query: bool = False,
+) -> bool:
     """Constant-time token comparison across accepted transports.
 
-    Preferred transport (Phase-2 policy): `Authorization: Bearer <token>`.
-    `sess=` cookie  : existing browser frontend (kept, never logged).
-    `?t=<token>`    : LEGACY query-string transport — preserved ONLY for the
-                      existing frontend `api()` helper; never logged, never
-                      expanded to new endpoints. New integrations must use
-                      the Authorization header.
+    Preferred transport: ``Authorization: Bearer <token>``. The historical
+    ``sess=`` cookie remains available to the local HTML frontend. Query-string
+    credentials are rejected unless the explicit, temporary compatibility
+    switch is enabled because URLs can leak through logs, history, and referrers.
     """
     expect = str(token or "")
     if not expect:
-        return True   # no token configured → local mode (documented)
-    for got in (str(header_t or ""), str(cookie_t or ""), str(query_t or "")):
-        if got and hmac.compare_digest(got, expect):
+        return True
+    transports = (str(header_t or ""), str(cookie_t or ""))
+    if allow_legacy_query:
+        transports += (str(query_t or ""),)
+    for got in transports:
+        if got and len(got) <= MAX_DASHBOARD_TOKEN_LENGTH and hmac.compare_digest(got, expect):
             return True
     return False
+
+
+def safe_request_id(value: str = "") -> str:
+    """Return a bounded correlation ID, replacing untrusted values."""
+    candidate = str(value or "")[:96]
+    return candidate if REQUEST_ID_RE.fullmatch(candidate) else uuid.uuid4().hex
+
+
+def safe_stored_error(value) -> str:
+    """Expose only whether a persisted operation failed, never its raw detail."""
+    return "operation_failed" if value else ""
 
 
 def safe_request_line(path: str) -> str:
@@ -2426,6 +2455,7 @@ class Handler(BaseHTTPRequestHandler):
     scans = []
     tenants = {}
     token = None
+    allow_legacy_query_token = False
     jobs = []                 # phase-3 ops snapshot (redacted, org-filtered)
     job_stages = {}           # scan_id -> [stage dicts]
     jobs_org = ""             # org filter (multi-tenant deployments)
@@ -2605,13 +2635,26 @@ class Handler(BaseHTTPRequestHandler):
             part = part.strip()
             if part.startswith("sess="):
                 cookie_t = part[len("sess="):]
-        return header_t, cookie_t, query_t
+        try:
+            cookie_t = urllib.parse.unquote(cookie_t, errors="strict")
+        except (UnicodeDecodeError, ValueError):
+            cookie_t = ""
+        return tuple(
+            value if len(value) <= MAX_DASHBOARD_TOKEN_LENGTH else ""
+            for value in (header_t, cookie_t, query_t)
+        )
 
     def authorized(self):
         if not self.token:
             return True
         header_t, cookie_t, query_t = self._get_token_transports()
-        return check_access(self.token, header_t, cookie_t, query_t)
+        return check_access(
+            self.token,
+            header_t,
+            cookie_t,
+            query_t,
+            allow_legacy_query=self.allow_legacy_query_token,
+        )
 
     def _same_origin_request(self) -> bool:
         """CSRF guard for cookie/query-transport POSTs: when the request is
@@ -2629,31 +2672,83 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return parsed.netloc == self.headers.get("Host", "")
 
+    def version_string(self):
+        """Avoid exposing the Python/http.server version to clients."""
+        return "SecurityToolkit"
+
+    def send_error(self, code, message=None, explain=None):
+        """Emit a fixed, correlated error rather than the stdlib HTML page."""
+        headers = getattr(self, "headers", {})
+        try:
+            supplied = headers.get("X-Request-ID", "")
+        except (AttributeError, TypeError):
+            supplied = ""
+        self.request_id = safe_request_id(supplied)
+        body = json.dumps({
+            "error": "http_error",
+            "request_id": self.request_id,
+        }, separators=(",", ":")).encode("utf-8")
+        self.send(code, body, "application/json; charset=utf-8")
+
+    def _request_id(self):
+        request_id = str(getattr(self, "request_id", "") or "")
+        if not REQUEST_ID_RE.fullmatch(request_id):
+            headers = getattr(self, "headers", {})
+            try:
+                supplied = headers.get("X-Request-ID", "")
+            except (AttributeError, TypeError):
+                supplied = ""
+            request_id = safe_request_id(supplied)
+            self.request_id = request_id
+        return request_id
+
     def send(self, code, body: bytes, ctype="text/html; charset=utf-8", extra=None):
+        request_id = self._request_id()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Request-ID", request_id)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Security-Policy",
-                         "default-src 'none'; style-src 'unsafe-inline'; "
-                         "script-src 'unsafe-inline'; img-src 'data:'; connect-src 'self'")
+                         "default-src 'none'; base-uri 'none'; object-src 'none'; "
+                         "frame-ancestors 'none'; form-action 'self'; "
+                         "style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+                         "img-src 'data:'; connect-src 'self'")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Permissions-Policy",
                          "camera=(), microphone=(), geolocation=(), "
                          "payment=(), usb=()")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header("X-Permitted-Cross-Domain-Policies", "none")
         self.send_header("Cache-Control", "no-store")
-        for k, v in (extra or {}).items():
-            self.send_header(k, v)
+        for key, value in (extra or {}).items():
+            if (
+                isinstance(key, str)
+                and isinstance(value, str)
+                and key.lower() != "x-request-id"
+                and not re.search(r"[\r\n:]", key)
+                and not re.search(r"[\r\n]", value)
+            ):
+                self.send_header(key, value)
         self.end_headers()
         try:
             self.wfile.write(body)
         except BrokenPipeError:
-            pass
+            return
 
     def json_out(self, code, obj):
-        self.send(code, json.dumps(obj, ensure_ascii=False, indent=1).encode(),
-                  "application/json; charset=utf-8")
+        payload = obj
+        if isinstance(obj, dict) and "error" in obj:
+            payload = dict(obj)
+            payload.setdefault("request_id", self._request_id())
+        self.send(code, json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8"), "application/json; charset=utf-8")
 
     def do_GET(self):
         self.route("GET")
@@ -2662,6 +2757,8 @@ class Handler(BaseHTTPRequestHandler):
         self.route("POST")
 
     def route(self, method):
+        self.request_id = safe_request_id(
+            self.headers.get("X-Request-ID", ""))
         Handler.refresh()
         if not self.authorized():
             if "api/" in self.path or "export/" in self.path:
@@ -2669,9 +2766,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(401, ("<div class='login'><h2>SecuPulse &mdash; token required</h2>"
                                    "<input id='tk' placeholder='access token'><br><br>"
                                    "<button class='btn' onclick='setTok()'>Unlock</button>"
-                                   "<script>function setTok(){document.cookie='sess='+"
-                                   "encodeURIComponent(document.getElementById('tk').value)"
-                                   "+';path=/';location.reload();}</script>").encode())
+                                   "<script>function setTok(){const t=document.getElementById('tk').value;"
+                                   "if(!t||t.length>4096)return;"
+                                   "const secure=location.protocol==='https:'?';Secure':'';"
+                                   "document.cookie='sess='+encodeURIComponent(t)+';Path=/;SameSite=Strict'+secure;"
+                                   "location.assign(location.pathname);}</script>").encode())
         # CSRF: cookie/query-transport browser POSTs must be same-origin.
         # Bearer-header calls are exempt (a cross-site page cannot read the
         # secret to attach; it is not a cookie). Local mode (no token) is
@@ -2748,8 +2847,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, render_tenant(m.group(1), self.scans,
                                                     self.tenants, self.root).encode())
             return self.send(404, b"not found")
-        except Exception as e:
-            return self.send(500, f"internal error: {e}".encode())
+        except Exception as exc:
+            logging.getLogger("security_toolkit.dashboard").error(
+                "dashboard_request_failed",
+                extra={
+                    "event": "dashboard_request_failed",
+                    "request_id": self.request_id,
+                    "exception_type": type(exc).__name__[:80],
+                },
+            )
+            if path.startswith("/api/") or path.startswith("/export/"):
+                return self.json_out(500, {"error": "internal_error"})
+            return self.send(500, b"internal error")
 
     # --- API --------------------------------------------------------------
     def _find(self, t, s):
@@ -2880,8 +2989,13 @@ class Handler(BaseHTTPRequestHandler):
             f = q.get("f", [""])[0]
             status = q.get("status", ["open"])[0]
             note = q.get("note", [""])[0]
-            if status not in STATUSES or not SAFE_ID.match(f) or not SAFE_ID.match(t) \
-                    or not SAFE_ID.match(s):
+            if (
+                status not in STATUSES
+                or not SAFE_ID.fullmatch(f)
+                or not SAFE_ID.fullmatch(t)
+                or not SAFE_ID.fullmatch(s)
+                or len(note) > MAX_STATUS_NOTE_LENGTH
+            ):
                 return self.json_out(400, {"error": "bad request"})
             if not self._find(t, s):
                 return self.json_out(404, {"error": "scan not found"})
@@ -3177,19 +3291,42 @@ class Handler(BaseHTTPRequestHandler):
         sc = self._find(m.group(1), m.group(2))
         if not sc:
             return self.send(404, b"not found")
-        with open(os.path.join(self.root, sc["file"]), "rb") as fh:
-            body = fh.read()
-        fn = os.path.basename(sc["file"])
-        return self.send(200, body, "application/json; charset=utf-8",
-                         {"Content-Disposition": f'attachment; filename="{fn}"'})
+        root_path = os.path.realpath(self.root)
+        source_path = os.path.realpath(os.path.join(root_path, sc["file"]))
+        try:
+            if os.path.commonpath((root_path, source_path)) != root_path:
+                return self.json_out(404, {"error": "not found"})
+            with open(source_path, "rb") as fh:
+                body = fh.read(MAX_EXPORT_BYTES + 1)
+        except OSError:
+            return self.json_out(404, {"error": "not found"})
+        if len(body) > MAX_EXPORT_BYTES:
+            return self.json_out(413, {"error": "export_too_large"})
+        raw_filename = os.path.basename(sc["file"])
+        filename = re.sub(r"[^A-Za-z0-9._-]", "_", raw_filename)[:128] or "report.json"
+        return self.send(
+            200,
+            body,
+            "application/json; charset=utf-8",
+            {"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     def log_message(self, fmt, *args):
-        # QUERY STRING STRIPPED: a legacy ?t=TOKEN must never hit the logs
-        sys.stderr.write("[http] %s %s \"%s\"\n" % (
-            self.client_address[0] if self.client_address else "-",
-            safe_request_line(self.path),
-            self.requestline.split(" ", 1)[1] if " " in self.requestline
-            else self.requestline))
+        """Log only a query-free, bounded request target and safe method."""
+        client = self.client_address[0] if self.client_address else "-"
+        method = str(getattr(self, "command", ""))[:16]
+        if not re.fullmatch(r"[A-Z]{1,16}", method):
+            method = "-"
+        target = safe_request_line(getattr(self, "path", ""))[:2048]
+        version = str(getattr(self, "request_version", ""))[:16]
+        if not re.fullmatch(r"HTTP/[0-9.]{1,8}", version):
+            version = "HTTP/?"
+        request_id = str(getattr(self, "request_id", "") or "")
+        if not REQUEST_ID_RE.fullmatch(request_id):
+            request_id = "-"
+        sys.stderr.write("[http] %s %s %s %s %s\n" % (
+            request_id, str(client)[:128], method, target, version))
+
 
 
 def is_loopback_bind_host(host: str) -> bool:
@@ -3213,6 +3350,13 @@ def is_loopback_bind_host(host: str) -> bool:
     return bool(mapped and mapped.is_loopback)
 
 
+def configured_dashboard_token(cli_token, environ=None):
+    """Read the explicit CLI token or preferred environment-backed token."""
+    source = os.environ if environ is None else environ
+    value = cli_token if cli_token is not None else source.get(DASHBOARD_TOKEN_ENV, "")
+    return str(value or "").strip()
+
+
 def main():
     ap = argparse.ArgumentParser(description="SecuPulse — findings dashboard")
     ap.add_argument("--root", default="results", help="Directory of result JSONs "
@@ -3220,7 +3364,16 @@ def main():
     ap.add_argument("--host", default="127.0.0.1",
                     help="Bind address (default 127.0.0.1; non-loopback requires --token)")
     ap.add_argument("--port", type=int, default=8080)
-    ap.add_argument("--token", default=None, help="Require this bearer token for access")
+    ap.add_argument(
+        "--token",
+        default=None,
+        help="Require a bearer token (prefer SECURITY_TOOLKIT_DASHBOARD_TOKEN env var)",
+    )
+    ap.add_argument(
+        "--allow-legacy-query-token",
+        action="store_true",
+        help="Temporarily accept ?t=<token>; URL credentials can leak through logs/history/referrers",
+    )
     ap.add_argument("--jobs-db", default=None,
                     help="Platform SQLite — adds the Phase-3 scan-jobs ops "
                          "panel (/jobs, /api/jobs) gated by the same token")
@@ -3240,13 +3393,26 @@ def main():
                     help="Identity org filter (one dashboard per org)")
     args = ap.parse_args()
 
-    token = str(args.token or "").strip()
+    token = configured_dashboard_token(args.token)
     if args.token is not None and not token:
         ap.error("--token must not be empty")
-    if token and len(token) > 4096:
-        ap.error("--token exceeds the maximum allowed length")
+    if args.token is not None:
+        print(
+            "[!] A command-line token may be visible to process inspection; "
+            f"prefer {DASHBOARD_TOKEN_ENV}.",
+            file=sys.stderr,
+        )
+    if token and len(token) > MAX_DASHBOARD_TOKEN_LENGTH:
+        ap.error("dashboard token exceeds the maximum allowed length")
     if not is_loopback_bind_host(args.host) and not token:
         ap.error("non-loopback bind refused: --token is required for remote access")
+    if args.allow_legacy_query_token and not token:
+        ap.error("--allow-legacy-query-token requires --token")
+    if args.allow_legacy_query_token:
+        print(
+            "[!] Legacy query-string authentication is enabled; credentials in URLs can leak.",
+            file=sys.stderr,
+        )
     token = token or None
 
     os.makedirs(args.root, exist_ok=True)
@@ -3255,6 +3421,7 @@ def main():
     Handler.scans = scans
     Handler.tenants = tenants
     Handler.token = token
+    Handler.allow_legacy_query_token = args.allow_legacy_query_token
     Handler.jobs_org = args.jobs_org or ""
     Handler.jobs, Handler.job_stages = load_jobs_snapshot(
         args.jobs_db, Handler.jobs_org)
@@ -3278,7 +3445,7 @@ def main():
     print(f"  Scans     : {len(scans)}")
     print(f"  URL       : http://127.0.0.1:{port}/")
     print(f"  API       : http://127.0.0.1:{port}/api/scans")
-    print(f"  Auth      : {'Bearer token required' if args.token else 'none (local)'}")
+    print(f"  Auth      : {'Bearer token required' if token else 'none (local)'}")
     print("  Ctrl+C to stop.")
     print("═" * 58)
     try:

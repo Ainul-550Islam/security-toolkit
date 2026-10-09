@@ -12,6 +12,7 @@
 #  Loaded by tests/run_tests.py so the WHOLE suite runs together.
 # ============================================================================
 
+import base64
 import json
 import os
 import shutil
@@ -19,6 +20,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = os.path.join(os.path.dirname(HERE), "python")
@@ -48,8 +50,17 @@ def make_service(tmp):
     return pf.PlatformService(os.path.join(tmp, "p9.db"))
 
 
+_TEST_ENCRYPTION_KEY = base64.b64encode(b"C" * 32).decode("ascii")
+
+
 class Phase9Base(unittest.TestCase):
     def setUp(self):
+        self._crypto_environment = patch.dict(os.environ, {
+            "SECURITY_TOOLKIT_ENCRYPTION_ACTIVE_KEY_ID": "test-cloud-key",
+            "SECURITY_TOOLKIT_ENCRYPTION_KEY": _TEST_ENCRYPTION_KEY,
+        })
+        self._crypto_environment.start()
+        self.addCleanup(self._crypto_environment.stop)
         self.tmp = tempfile.mkdtemp(prefix="p9t_")
         self.svc = make_service(self.tmp)
         self.org = self.svc.org_create("acme")
@@ -164,10 +175,18 @@ class TestCloudAccountLifecycle(Phase9Base):
             "WHERE id=?", (a.id,))[0]
         self.assertTrue(row["credential_enc"])
         self.assertNotIn(secret, row["credential_enc"])
-        self.assertTrue(row["credential_hint"].startswith("enc:"))
-        # non-reversible: hint never contains secret characters
+        self.assertEqual(row["credential_hint"], "configured")
+        # The hint is a constant boolean-like label, not a secret fingerprint.
         self.assertNotIn(secret[:8], row["credential_hint"])
         self.assertNotIn(secret, json.dumps(a.to_dict()))
+        crypto = cs.CryptoService()
+        aad = f"cloud-account-credential:v1:{self.org.id}:{a.id}"
+        self.assertEqual(crypto.decrypt_text(row["credential_enc"], associated_data=aad), secret)
+        with self.assertRaises(cs.EncryptedValueError):
+            crypto.decrypt_text(
+                row["credential_enc"],
+                associated_data=f"cloud-account-credential:v1:{self.org2.id}:{a.id}",
+            )
         # view redaction (defense in depth)
         import redact
         view = redact.redact(a.to_dict())
@@ -719,7 +738,7 @@ class TestInProcessJobs(Phase9Base):
         self.assertEqual(names, {
             "cloud-scan", "cloud-inventory", "container-scan",
             "kubernetes-scan", "iac-scan", "posture-snapshot",
-            "federation-bulk", "integration-delivery"})
+            "federation-bulk", "integration-delivery", "report-generation"})
         for name in names:
             with self.assertRaises(errors.ValidationError):
                 self.reg.build_argv(name, "x", {}, "/tmp", 60)

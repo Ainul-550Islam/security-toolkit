@@ -195,12 +195,14 @@ class VocabularySchemaTests(FedBase):
             {"siem_export", "ticketing_export", "data_lake_export",
              "grc_ingestion", "webhook"})
 
-    def test_schema_v15_preserves_v14_tables_with_unique_claims(self):
+    def test_schema_v16_preserves_v15_tables_with_unique_claims(self):
         # Phase 13 advanced the schema to v15 (integration pipeline tables);
-        # the v14 tables and constraints asserted here are unchanged.
+        # API idempotency adds v16 and customer preferences add v17 without
+        # changing those earlier uniqueness constraints. Later migrations
+        # may advance the version further, so require the current minimum.
         v = self.svc.db.query_one(
             "SELECT MAX(version) v FROM schema_version")
-        self.assertEqual(int(v["v"]), 15)
+        self.assertGreaterEqual(int(v["v"]), 17)
         for table in ("federation_peers", "federation_policies",
                       "federation_packages", "federation_imports",
                       "external_integrations", "integration_events"):
@@ -213,6 +215,10 @@ class VocabularySchemaTests(FedBase):
             "SELECT sql FROM sqlite_master WHERE type='table' AND "
             "name='federation_imports'")[0]["sql"]
         self.assertIn("UNIQUE(org_id, package_hash)", sql)
+        idem_sql = self.svc.db.query(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND "
+            "name='api_idempotency_records'")[0]["sql"]
+        self.assertIn("UNIQUE(org_id, scope, key_hash)", idem_sql)
 
     def test_event_and_audit_vocabularies_extended(self):
         for ev in ("federation.peer_created", "federation.peer_revoked",
@@ -1762,9 +1768,9 @@ class RbacTierTests(unittest.TestCase):
 
     def test_permission_vocabulary_registered(self):
         self.assertTrue(self.PHASE12.issubset(set(rbac.PERMISSIONS)))
-        # Phase 13 added 8 integration.* permissions (137 -> 145); the
-        # Phase-12 subset above is unchanged.
-        self.assertEqual(len(rbac.PERMISSIONS), 145)
+        # Phase 13 added 8 integration.* permissions (137 -> 145), then
+        # notification.configure was added for tenant settings (145 -> 146).
+        self.assertEqual(len(rbac.PERMISSIONS), 146)
 
     def test_viewer_and_analyst_get_nothing(self):
         for role in ("viewer", "analyst"):
@@ -1789,11 +1795,12 @@ class RbacTierTests(unittest.TestCase):
             self.assertTrue(self.PHASE12.issubset(perms), role)
         self.assertEqual(len(rbac.permissions_for(("viewer",))), 35)
         self.assertEqual(len(rbac.permissions_for(("analyst",))), 63)
-        # Phase 13: security_manager +6 operational integration perms
-        # (113 -> 119); admin/owner +2 high-impact (137 -> 145).
+        # Phase 13 added 6 operational integration permissions to
+        # security_manager (113 -> 119); notification.configure adds one
+        # more (119 -> 120). Admin/owner also hold it (145 -> 146).
         self.assertEqual(
-            len(rbac.permissions_for(("security_manager",))), 119)
-        self.assertEqual(len(rbac.permissions_for(("admin",))), 145)
+            len(rbac.permissions_for(("security_manager",))), 120)
+        self.assertEqual(len(rbac.permissions_for(("admin",))), 146)
 
     def test_tiers_are_monotonic(self):
         v = rbac.permissions_for(("viewer",))

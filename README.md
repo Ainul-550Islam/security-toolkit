@@ -70,10 +70,11 @@ security-toolkit/
 
 ## 🏗️ PART 01 — Enterprise Foundation
 
-The foundation is a **new layer that sits beside the working system**, not a
-rewrite of it. `core/`, `config/`, `interfaces/`, `services/`, `api/` and
-`schemas/` import nothing from `python/`, so they are testable in isolation;
-the existing domain code keeps working untouched.
+The foundation is a **new layer alongside the working security engine**, not a
+replacement project. `core/`, `config/`, `interfaces/`, `services/`, `api/` and
+`schemas/` remain independently testable; explicit adapters connect them to
+existing domain logic, and the legacy modules are hardened where the new API
+and product workflows require it.
 
 ```
 security-toolkit/
@@ -83,14 +84,16 @@ security-toolkit/
 │                filter), feature_flags
 ├── interfaces/     telemetry, engine, secrets, scanner, storage, policy
 │                — Protocol contracts only
-├── services/       engine_registry (Python/Rust/C++/unavailable/degraded),
-│                health_service (liveness/readiness), capability_service
-├── api/v1/         /livez /readyz /healthz /metadata /version
-│                /capabilities /features
+├── services/       engine/health/capability registries, AES-GCM crypto and
+│                key management, database/migrations, cloud and integration
+│                boundaries (provider availability is explicit)
+├── api/            bounded WSGI HTTP adapter, middleware, auth, OpenAPI,
+│                tenant-scoped `/api/v1` customer and platform-admin routes
 ├── schemas/        event / finding / health JSON Schemas (draft 2020-12)
 ├── native/rust/    engine_core — zero deps, #![forbid(unsafe_code)]
 ├── native/cpp/     security_engine — C++17, RAII, hardened flags
-└── web/ infra/     documented placeholders — **nothing implemented**
+├── web/            React + TypeScript + Vite customer app (`web/README.md`)
+└── infra/          deployment documentation; no provisioned cloud services
 ```
 
 ### Properties the foundation guarantees
@@ -101,13 +104,13 @@ security-toolkit/
 | Config fails closed | `config/settings.py` | defaults bind `127.0.0.1`, require auth + TLS, `debug=False`; production **refuses** `debug`, disabled auth, disabled TLS or a `0.0.0.0` bind |
 | Unset ≠ empty ≠ invalid | `config/settings.py` | three distinct error codes instead of one falsy check |
 | Secrets never reach a log | `config/logging.py` | redaction is a `logging.Filter` on the handler, so it scrubs every record regardless of call site; by key name *and* by value shape (Authorization, bearer, cookies, passwords, API keys, private keys, webhook secrets) |
-| No custom cryptography | `interfaces/secrets.py` | secrets are an **interface only** — a `SecretValue` refuses to hash/print its material, and the module is AST-checked to contain no crypto primitives |
+| No home-grown cryptography | `services/crypto.py` | secret encryption uses pyca/cryptography AES-256-GCM with versioned ciphertext, key IDs, random nonces and required associated data |
 | Path safety | `core/paths.py` | rejects `..`, absolute components, drive-qualified paths and control characters; resolves symlinks *before* the containment check |
 | Engines are never faked | `services/engine_registry.py` | Rust/C++ engines are declared but register as `unavailable` **with a reason**; `execute()` raises instead of returning an empty result; the registry empty state is `unknown`, not `healthy` |
 | Health never leaks | `services/health_service.py` | liveness ignores dependencies, readiness consults them and fails closed; probes report the exception **type** only |
 | Policy is deny-by-default | `interfaces/policy.py` | absence of a rule is a denial, and an `allow` requires a recorded reason |
 | Schemas are versioned | `schemas/` | closed enums, UTC-only timestamps, `schema_version` pinned to `1` and checked against the Rust **and** C++ declarations |
-| Dependencies are justified | `requirements.txt` | **empty on purpose** — PART 01 adds zero runtime dependencies; `requirements-dev.txt` holds only mypy + ruff |
+| Dependencies are justified | `requirements.txt` | exact pins for `cryptography==50.0.2` and its transitive `cffi==2.1.0` / `pycparser==3.0`; `requirements-dev.txt` holds mypy + ruff |
 
 ### The `platform` collision (PART 01's mandatory first fix)
 
@@ -120,7 +123,10 @@ because a module at that path recreates the exact bug. Regression tests assert
 that `import platform` now resolves to the standard library, that no project
 symbol leaks into it, and that both modules are usable in one process.
 
-### Validation — actually executed
+### PART 01 baseline validation — historical
+
+The commands/counts in this block document the original foundation-only pass;
+current productization verification is recorded below.
 
 ```bash
 python3 -m compileall .                                   # exit 0
@@ -160,25 +166,47 @@ names cannot hide tests. `unittest discover` reports 1133 module tests; the
 custom runner adds 48 integration cases defined in `tests/run_tests.py` for a
 final 1181.
 
-**Legacy dashboard warning (not changed in PART 01):** `main.py dashboard` and
-direct `python/dashboard.py` still default to binding `0.0.0.0` with no token
-unless one is supplied. Do not expose that legacy dashboard to an untrusted
-network. A later compatibility-reviewed change should default it to loopback
-and require authentication for non-loopback binds.
+**Legacy dashboard hardening:** `main.py dashboard` and direct
+`python/dashboard.py` bind to loopback by default and refuse non-loopback binds
+without `--token`. Query-string credentials are rejected by default because
+URLs can leak through history, logs, and referrers. `--allow-legacy-query-token`
+is a temporary, explicit compatibility escape hatch and prints a warning. The
+stdlib dashboard does not terminate TLS; use a trusted TLS proxy for remote
+access. Its read-only panels remain separate from the customer `/api/v1` API.
 
-### What PART 01 does **not** do
+### Current productization scope and limits
 
-* `web/` and `infra/` contain **documentation only** — no TypeScript, no
-  Dockerfile, no manifests. The files say so explicitly rather than implying
-  otherwise.
-* No Rust or C++ code is reachable from Python. PART 01 ships an `rlib` only —
-  no `cdylib`, no FFI, no autoloading. The engines are *declared*, and report
-  themselves `unavailable`.
-* No certifications, no compliance claims, no pentest results. `SECURITY.md`
-  says this explicitly.
-* Phase 13 (enterprise integrations) is **partially** complete: files 1–8 of
-  the plan are implemented and green; files 9–12 remain. Nothing in the
-  README claims otherwise.
+* `web/` now contains the React/TypeScript customer app; `infra/` remains
+  documentation-only. No deployment environment or cloud account is created
+  by this code change.
+* The AWS/Azure/GCP adapters make bounded, read-only provider calls when their
+  optional SDKs and valid credentials are available. Provider results were
+  tested with local SDK doubles; no live cloud account was contacted.
+* Jira/ticketing and notification adapters fail closed when their credential
+  resolver/provider is not configured. No live provider success is claimed.
+* Rust/C++ engines are still declared as unavailable unless built and
+  registered; the productization does not invent engine results.
+* No certifications, compliance claims, or external penetration-test results
+  are asserted. `SECURITY.md` remains explicit about those limits.
+
+### Current productization verification — 2026-10-03
+
+* `python3 -m compileall -q api core config interfaces services python tests` —
+  passed.
+* `python3 tests/run_tests.py` — **1,279 tests ran; 0 failures, 0 errors**
+  in 498.504 seconds. The suite emits non-fatal `ResourceWarning`s for some
+  test/legacy resources.
+* Targeted groups also passed: API resources (13), product integrations (8),
+  dashboard/security (106), cloud adapters (8), crypto (6), database
+  migrations (5), and identity refresh (5).
+* `cd web && npm ci --no-audit --no-fund` — installed the locked dependencies;
+  `npm run typecheck`, `npm run lint`, `npm test` (**6 passed**), and
+  `npm run build` all passed.
+* `cd web && npm audit --audit-level=high` — **0 vulnerabilities reported**.
+
+No browser-based visual test or live AWS/Azure/GCP/Jira/provider call was run.
+The dev preview is a frontend preview; API-backed workflows require a running
+API configured with appropriate credentials and keys.
 
 ---
 
@@ -201,9 +229,9 @@ python3 main.py waf https://example.com          # WAF fingerprinting
 python3 main.py subdomain example.com --resolve  # ⭐ Part 5: crt.sh + DNS brute (OSINT, passive!)
 python3 main.py cloud --bucket mycompany-assets  # ⭐ Part 5: S3/GCS bucket exposure check
 python3 main.py cloud --service 203.0.113.5      # ⭐ Part 5: Redis/Mongo/ES/Memcached port check
-python3 main.py dashboard --root results --host 127.0.0.1  # local-only; override the insecure legacy default explicitly
-export DASHBOARD_TOKEN='replace-with-a-long-random-token'
-python3 main.py dashboard --root results --host 0.0.0.0 --token "$DASHBOARD_TOKEN"  # external bind requires a strong token + trusted TLS proxy
+python3 main.py dashboard --root results --host 127.0.0.1  # loopback is the default
+export SECURITY_TOOLKIT_DASHBOARD_TOKEN='replace-with-a-long-random-token'
+python3 main.py dashboard --root results --host 0.0.0.0  # remote bind requires a token; put it behind trusted TLS
 python3 main.py hunt example.com --client acme   # ⭐ Part 7: FULL chain — subdomain→probe→takeover→crawl→templates (passive)
 python3 main.py hunt example.com --active --client acme   # ⭐ Part 7: + directed fuzzing on found params (AUTHORIZED ONLY)
 python3 main.py hunt example.com --hosts www.example.com,api.example.com   # ⭐ Part 7: skip recon, target specific hosts

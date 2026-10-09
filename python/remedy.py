@@ -287,6 +287,29 @@ class RemediationService:
                                  "to": str(due_at)})
         return self._ticket(ticket_id)
 
+    def add_comment(self, ticket_id: str, comment: str, *,
+                    actor: str = "cli") -> dict:
+        """Append a redacted customer comment to the ticket's audit history."""
+        ticket = self._ticket(ticket_id)
+        if not isinstance(comment, str):
+            raise errors.ValidationError("comment_rejected: expected text")
+        text = comment.strip()
+        try:
+            size = len(text.encode("utf-8", "strict"))
+        except UnicodeEncodeError:
+            raise errors.ValidationError("comment_rejected: invalid text") from None
+        if not 1 <= size <= 2000:
+            raise errors.ValidationError("comment_rejected: size out of range")
+        safe_text = redact.redact_text(text)
+        self._history(ticket_id, "comment", actor,
+                      {"comment": safe_text[:2000]})
+        self.svc.audit("remediation.comment_added",
+                       object_type="remediation", object_id=ticket_id,
+                       org_id=ticket["org_id"],
+                       project_id=ticket["project_id"], actor=actor,
+                       metadata={"comment_length": len(safe_text)})
+        return self.view(ticket_id)
+
     # ------------------------------------------------------ verification
     def _registry(self):
         if self._registry_obj is None:

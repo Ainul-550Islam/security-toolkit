@@ -126,6 +126,16 @@ from test_configuration import *  # noqa: F401,F403,E402
 from test_engine_registry import *  # noqa: F401,F403,E402
 from test_schemas import *  # noqa: F401,F403,E402
 from test_security_baseline import *  # noqa: F401,F403,E402
+from test_api_http import *  # noqa: F401,F403,E402
+from test_api_router import *  # noqa: F401,F403,E402
+from test_identity_refresh import *  # noqa: F401,F403,E402
+from test_api_idempotency import *  # noqa: F401,F403,E402
+from test_api_resources import *  # noqa: F401,F403,E402
+from test_api_resources_51_60 import *  # noqa: F401,F403,E402
+from test_product_integrations import *  # noqa: F401,F403,E402
+from test_cloud_adapters import *  # noqa: F401,F403,E402
+from test_crypto import *  # noqa: F401,F403,E402
+from test_database_migrations import *  # noqa: F401,F403,E402
 
 import password_audit
 import phishing_detector
@@ -985,6 +995,16 @@ def load_tests(loader, standard_tests, pattern):
         "test_engine_registry",
         "test_schemas",
         "test_security_baseline",
+        "test_api_http",
+        "test_api_router",
+        "test_identity_refresh",
+        "test_api_idempotency",
+        "test_api_resources",
+        "test_api_resources_51_60",
+        "test_product_integrations",
+        "test_cloud_adapters",
+        "test_crypto",
+        "test_database_migrations",
     )
     missing_modules = [name for name in module_names if name not in sys.modules]
     if missing_modules:

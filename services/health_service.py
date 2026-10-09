@@ -18,8 +18,10 @@ category, never by raw exception text.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from core.clock import Clock, SystemClock, utcnow_iso
@@ -33,6 +35,8 @@ from core.constants import (
 from core.runtime import runtime_info
 from core.version import API_VERSION, APP_NAME, VERSION
 from services.engine_registry import EngineRegistry
+
+_SAFE_DEPENDENCY_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,79}$")
 
 
 @dataclass(frozen=True, slots=True)

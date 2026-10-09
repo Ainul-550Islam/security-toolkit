@@ -1786,6 +1786,41 @@ MIGRATIONS = [
     CREATE INDEX idx_intclaims_iid ON
       integration_replay_claims(integration_id, created_at);
     """,
+    # v16 — HTTP idempotency records for customer-facing write endpoints.
+    # The client key is SHA-256 hashed, response bodies contain only safe
+    # resource references, and expired records are bounded by the service.
+    """
+    CREATE TABLE api_idempotency_records (
+      id            TEXT PRIMARY KEY,
+      org_id        TEXT NOT NULL REFERENCES organizations(id)
+                    ON DELETE CASCADE,
+      scope         TEXT NOT NULL,
+      key_hash      TEXT NOT NULL,
+      request_hash  TEXT NOT NULL,
+      state         TEXT NOT NULL DEFAULT 'in_progress',
+      status_code   INTEGER NOT NULL DEFAULT 0,
+      response_json TEXT NOT NULL DEFAULT '{}',
+      created_at    TEXT NOT NULL,
+      updated_at    TEXT NOT NULL,
+      expires_at    TEXT NOT NULL,
+      UNIQUE(org_id, scope, key_hash)
+    );
+    CREATE INDEX idx_api_idempotency_expiry
+      ON api_idempotency_records(expires_at);
+    CREATE INDEX idx_api_idempotency_scope
+      ON api_idempotency_records(org_id, scope, created_at);
+    """,
+    # v17 — persisted customer organization locale/timezone preferences.
+    # Defaults remain explicit in the service when no preference row exists.
+    """
+    CREATE TABLE organization_preferences (
+      org_id     TEXT PRIMARY KEY REFERENCES organizations(id)
+                 ON DELETE CASCADE,
+      timezone   TEXT NOT NULL DEFAULT 'UTC',
+      locale     TEXT NOT NULL DEFAULT 'en',
+      updated_at TEXT NOT NULL
+    );
+    """,
 ]
 
 

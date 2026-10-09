@@ -59,6 +59,9 @@ _PAYLOAD_KEYS = frozenset({
     # object selection is derived server-side from the policy scope, never
     # carried as an unbounded payload list)
     "op", "peer_id", "policy_id", "package_id", "strategy", "object_types",
+    # Existing report generation is queued through the same job engine; only
+    # bounded report identifiers/options are carried, never report payloads.
+    "report_type", "title", "store_payload",
 })
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
 # printable ASCII only; rejects shell metacharacters that have no place in
@@ -163,6 +166,11 @@ class JobService:
         self.project_concurrency = int(project_concurrency)
         self.scan_concurrency = int(scan_concurrency)
         self._rr_org: str | None = None      # round-robin fairness pointer
+
+    @staticmethod
+    def validate_payload(payload) -> None:
+        """Expose the canonical payload validator to request adapters."""
+        validate_payload(payload)
 
     # ----------------------------------------------------------- audit
     def _audit(self, action: str, job, **kw):

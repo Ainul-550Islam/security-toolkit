@@ -259,7 +259,10 @@ class AuthorizationService:
         try:
             if not ctx.org_id or ctx.org_id != org_id:
                 raise errors.AuthorizationError("Forbidden")
-            if not (ctx.roles or ctx.memberships or ctx.org_scope):
+            # Project memberships grant access only through require_project.
+            # Treating any membership as tenant-wide here lets a project-bound
+            # credential or membership-only user cross the organization boundary.
+            if not (ctx.roles or ctx.org_scope):
                 raise errors.AuthorizationError("Forbidden")
         except errors.AuthorizationError:
             self._deny(ctx, "organization.access", "org")
@@ -322,6 +325,22 @@ class AuthorizationService:
             self._deny(ctx, "scan.access", "scan")
             raise errors.AuthorizationError("Forbidden") from None
 
+    def require_report(self, ctx: AuthContext, report_id: str):
+        """Require report ownership before exposing any report metadata or payload."""
+        rows = self.db.query(
+            "SELECT id, org_id, project_id FROM report_runs WHERE id=? LIMIT 1",
+            (report_id,),
+        )
+        if not rows or rows[0]["org_id"] != ctx.org_id:
+            self._deny(ctx, "report.access", "report")
+            raise errors.AuthorizationError("Forbidden")
+        try:
+            self.require_project(ctx, rows[0]["project_id"])
+        except errors.AuthorizationError:
+            self._deny(ctx, "report.access", "report")
+            raise errors.AuthorizationError("Forbidden") from None
+        return rows[0]
+
     def require_finding(self, ctx: AuthContext, finding_id: str):
         try:
             finding = self.platform.finding_get(finding_id)
@@ -330,6 +349,21 @@ class AuthorizationService:
         except (errors.AuthorizationError, errors.NotFoundError):
             self._deny(ctx, "finding.access", "finding")
             raise errors.AuthorizationError("Forbidden") from None
+
+    def require_user(self, ctx: AuthContext, user_id: str):
+        """Require an organization administrator context for user records.
+
+        A project membership is not a tenant-wide identity grant. The lookup
+        verifies the row's organization before the safe user projection is
+        returned to a route.
+        """
+        rows = self.db.query(
+            "SELECT id, org_id FROM users WHERE id=? LIMIT 1", (user_id,))
+        if not rows or rows[0]["org_id"] != ctx.org_id:
+            self._deny(ctx, "user.access", "user")
+            raise errors.AuthorizationError("Forbidden")
+        self.require_org(ctx, rows[0]["org_id"])
+        return self.identity.user_get(user_id)
 
     def require_evidence(self, ctx: AuthContext, evidence_id: str):
         try:

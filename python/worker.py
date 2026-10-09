@@ -249,7 +249,19 @@ class WorkerRuntime:
                 self.svc.scan_transition(job.scan_id, "completed")
         except errors.LifecycleError:
             pass
-        self.jobs.complete(job.id, result_reference=f"scan:{job.scan_id}",
+        result_reference = f"scan:{job.scan_id}"
+        if job.profile == "report-generation":
+            for record in stage_recs:
+                for segment in str(record.result_reference or "").split("|"):
+                    if segment.startswith("report_id:"):
+                        report_id = segment.partition(":")[2]
+                        if report_id and len(report_id) <= 128 and all(
+                                char.isalnum() or char in "-_." for char in report_id):
+                            result_reference = "report:" + report_id
+                            break
+                if result_reference.startswith("report:"):
+                    break
+        self.jobs.complete(job.id, result_reference=result_reference,
                            actor=self.worker_id)
         metrics.inc("scans_completed")
         log.info("job completed", job=job.id, scan=job.scan_id,
@@ -308,6 +320,11 @@ class WorkerRuntime:
             for k, v in sorted(raw["_phase13"].items()):
                 if isinstance(v, (int, float, bool)):
                     ref += f"|phase13.{k}:{v}"
+        if isinstance(raw, dict) and isinstance(raw.get("_report"), dict):
+            report_id = str(raw["_report"].get("report_id", ""))
+            if report_id and len(report_id) <= 128 and all(
+                    char.isalnum() or char in "-_." for char in report_id):
+                ref += f"|report_id:{report_id}"
         stage = models.StageRecord(
             scan_id=job.scan_id, stage=stage_name, status="completed",
             job_id=job.id, attempt=stage.attempt,
@@ -616,6 +633,13 @@ class WorkerRuntime:
                              "the canonical integration_events record",
                      "_phase13": out},
                     False)
+        if profile_name == "report-generation":
+            # Reports are generated asynchronously by the existing worker
+            # queue; ReportService remains the only report implementation.
+            report = self._report_generation_stage(job, actor)
+            return ({"tool": "report-generation", "stage": stage_name,
+                     "target": target or "", "assets": [], "findings": [],
+                     "_report": report}, False)
         try:
             out = self._dispatch_in_process(profile_name, stage_name, job,
                                             target, payload, actor,
@@ -637,6 +661,31 @@ class WorkerRuntime:
                               "open_findings", "risk_score",
                               "risk_level")}},
                 False)
+
+    def _report_generation_stage(self, job, actor: str) -> dict:
+        import reporting as reporting_mod
+
+        payload = dict(job.payload or {})
+        report_type = str(payload.get("report_type") or "")
+        title = str(payload.get("title") or "")[:200]
+        store_payload = payload.get("store_payload", False)
+        if not isinstance(store_payload, bool):
+            raise errors.ScannerError(
+                "report_payload_invalid: store_payload must be a boolean")
+        service = reporting_mod.ReportService(self.svc)
+        snapshot = service.snapshot(
+            job.project_id,
+            report_type,
+            title=title,
+            generated_by=actor,
+            store_payload=store_payload,
+        )
+        run = service.store_run(snapshot, store_payload=store_payload)
+        return {
+            "report_id": str(run.get("id", "")),
+            "report_type": report_type,
+            "report_hash": str(run.get("report_hash", ""))[:64],
+        }
 
     def _dispatch_in_process(self, profile_name, stage_name, job, target,
                              payload, actor, _require):

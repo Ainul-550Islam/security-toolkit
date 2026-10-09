@@ -27,6 +27,7 @@ import hmac
 import secrets
 import threading
 import time
+from datetime import datetime, timezone
 
 import errors
 import models
@@ -97,8 +98,14 @@ def _parse_ts(ts: str) -> float:
     if not ts:
         return 0.0
     try:
-        return time.mktime(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))
-    except Exception:
+        value = str(ts).strip()
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return 0.0
+        return parsed.astimezone(timezone.utc).timestamp()
+    except (TypeError, ValueError, OverflowError, OSError):
         return 0.0
 
 
@@ -386,8 +393,15 @@ class IdentityService:
                     "UPDATE sessions SET revoked_at=?, revoke_reason=? "
                     "WHERE user_id=? AND revoked_at=''",
                     (models.utcnow(), "user_status:" + status, user_id))
-        self._audit("user.disabled" if status == "disabled" else "user.enabled",
-                    object_type="user", object_id=user_id, org_id=user.org_id,
+        action_by_status = {
+            "active": "user.enabled",
+            "disabled": "user.disabled",
+            "suspended": "user.suspended",
+            "deactivated": "user.deactivated",
+            "pending": "user.pending",
+        }
+        self._audit(action_by_status[status], object_type="user",
+                    object_id=user_id, org_id=user.org_id,
                     actor=self._audit_actor(actor))
         return self.user_get(user_id)
 
@@ -608,14 +622,79 @@ class IdentityService:
                          (models.utcnow(), sess.id))
         return sess
 
-    def session_revoke_id(self, session_id: str, *, reason: str = "") -> None:
+    def session_refresh(self, secret: str, *, actor: str = "identity") -> dict:
+        """Rotate a live session token without extending its absolute lifetime.
+
+        The previous bearer stops authenticating as soon as the guarded update
+        commits. A short MFA-pending session remains pending and cannot be
+        upgraded by refresh. Concurrent refresh attempts using the old token
+        cannot both succeed because the token verifier is part of the update
+        predicate.
+        """
+        if not secret or not secret.startswith(TOKEN_PREFIXES["session"]):
+            raise errors.AuthenticationError("Invalid credentials")
+        session = self.session_authenticate(secret)
+        user = self.user_get(session.user_id)
+        if user.status != "active":
+            raise errors.AuthenticationError("Invalid credentials")
+        self._throttle("session_create", session.user_id)
+
+        now_epoch = _epoch()
+        absolute_expiry = _parse_ts(session.absolute_expires_at)
+        if not absolute_expiry:
+            absolute_expiry = now_epoch + ABSOLUTE_SESSION_TTL_SECONDS
+        if absolute_expiry <= now_epoch:
+            self.session_revoke_id(session.id, reason="absolute_expiry")
+            raise errors.AuthenticationError("Invalid credentials")
+
+        lifetime = (
+            PENDING_MFA_TTL_SECONDS
+            if session.mfa_status == "pending"
+            else self.session_ttl
+        )
+        next_expiry = min(now_epoch + lifetime, absolute_expiry)
+        if next_expiry <= now_epoch:
+            raise errors.AuthenticationError("Invalid credentials")
+
+        replacement = generate_token("session")
+        replacement_hash = token_hash(replacement)
+        now_text = models.utcnow()
+        expiry_text = _iso_from_epoch(next_expiry)
+        absolute_text = _iso_from_epoch(absolute_expiry)
+        with self.db.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE sessions SET token_hash=?, expires_at=?, "
+                "absolute_expires_at=?, last_seen_at=? WHERE id=? "
+                "AND token_hash=? AND revoked_at='' AND expires_at>? "
+                "AND (absolute_expires_at='' OR absolute_expires_at>?)",
+                (replacement_hash, expiry_text, absolute_text, now_text,
+                 session.id, session.token_hash, now_text, now_text),
+            )
+            if cursor.rowcount != 1:
+                raise errors.AuthenticationError("Invalid credentials")
+        refreshed = models.SessionRecord.from_dict(
+            self.db.query_one("SELECT * FROM sessions WHERE id=? LIMIT 1",
+                              (session.id,))
+        )
+        self._audit(
+            "session.refreshed",
+            object_type="session",
+            object_id=refreshed.id,
+            org_id=user.org_id,
+            actor=self._audit_actor(actor),
+            metadata={"mfa": refreshed.mfa_status},
+        )
+        return {"session": refreshed, "secret": replacement}
+
+    def session_revoke_id(self, session_id: str, *, reason: str = "",
+                           actor: str = "identity") -> None:
         try:
             self.db.execute(
                 "UPDATE sessions SET revoked_at=?, revoke_reason=? WHERE id=?",
                 (models.utcnow(), str(reason or "")[:64], session_id))
             self._audit("session.revoked", object_type="session",
-                        object_id=session_id, actor=self._audit_actor(
-                            "identity"),
+                        object_id=session_id,
+                        actor=self._audit_actor(actor),
                         metadata={"reason": str(reason or "")[:64]})
         except Exception:
             pass
@@ -670,7 +749,7 @@ class IdentityService:
             (user_id,))
         n = 0
         for r in rows:
-            self.session_revoke_id(r["id"], reason=reason)
+            self.session_revoke_id(r["id"], reason=reason, actor=actor)
             n += 1
         if n:
             self._audit("identity.session.revoked_all", object_type="user",
@@ -687,7 +766,7 @@ class IdentityService:
             "WHERE u.org_id=? AND s.revoked_at='' LIMIT 500", (org_id,))
         n = 0
         for r in rows:
-            self.session_revoke_id(r["id"], reason=reason)
+            self.session_revoke_id(r["id"], reason=reason, actor=actor)
             n += 1
         self._audit("identity.session.revoked_all", object_type="organization",
                     object_id=org_id, org_id=org_id,

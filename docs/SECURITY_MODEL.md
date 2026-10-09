@@ -41,19 +41,69 @@ production:
 * A missing or empty secret raises; it never returns `""`, which a caller
   could mistake for "no authentication required".
 
-**Known legacy exception:** `main.py dashboard` and direct
-`python/dashboard.py` still default to `0.0.0.0`; the bearer token is optional
-and unset by default. This pre-existing Phase 1–12 behavior was not changed in
-PART 01. Do not expose that dashboard on an untrusted network: explicitly bind
-to `127.0.0.1` for local use, or set a strong token and use a trusted TLS
-proxy. A later compatibility-reviewed change should make loopback the default
-and require authentication for non-loopback binds.
+**Legacy dashboard boundary:** `main.py dashboard` and direct
+`python/dashboard.py` bind to loopback by default and refuse non-loopback binds
+without a token. Prefer `SECURITY_TOOLKIT_DASHBOARD_TOKEN` over the legacy
+`--token` CLI argument, which can be visible to process inspection. The portal
+emits request IDs and security headers, redacts internal exceptions, and
+rejects query-string token authentication by default. The explicit
+`--allow-legacy-query-token` switch is temporary and unsafe; it prints a warning
+and should be used only for a controlled migration. The stdlib dashboard does
+not terminate TLS; remote access requires a trusted TLS proxy. Its legacy
+cookie-based HTML session is separate from the React app, which keeps its
+bearer token in memory only.
 
 ## Secret handling
 
-**We do not implement cryptography.** There is no home-grown encryption,
-obfuscation or base64 "encoding" masquerading as protection — that invites
-false confidence and is worse than storing plaintext knowingly.
+**Cryptographic primitives are delegated to pyca/cryptography.**
+`services/crypto.py` uses AES-256-GCM with 96-bit random nonces, a 128-bit
+authentication tag, a versioned ciphertext envelope, key identifiers, and
+required associated data. Ciphertext fails closed on malformed formats,
+unknown key IDs, context mismatch, or authentication failure. The code does
+not implement a cipher, keystream, padding scheme, or MAC.
+
+`services/key_management.py` provides an injectable key-provider contract and
+an environment-backed provider. Keys are strict base64 encodings of exactly
+32 bytes. Configure `SECURITY_TOOLKIT_ENCRYPTION_ACTIVE_KEY_ID` and
+`SECURITY_TOOLKIT_ENCRYPTION_KEY`; retain old key IDs in
+`SECURITY_TOOLKIT_ENCRYPTION_KEY_<ID>` while ciphertext still refers to them.
+No local key is generated when configuration is missing. Vault/KMS providers
+can implement the same contract but are not included or claimed as configured.
+Environment keys are visible to the process and should be supplied through a
+secret manager or protected process environment, never committed to source.
+Existing XOR-wrapped notification values have decrypt-only migration support:
+the old key is read only when it already exists, and each value is immediately
+rewritten as authenticated ciphertext with tenant/project-bound associated
+data. The old XOR format is never written; migration fails closed if its key
+or the new AEAD key is unavailable. The legacy key file is not created by the
+new code.
+
+Cloud-account credentials use the same `CryptoService`, with associated data
+`cloud-account-credential:v1:<tenant-id>:<account-id>` so ciphertext copied to
+another tenant or account cannot be authenticated. Cloud credential writes
+fail closed without a configured active key. Provider adapters receive
+plaintext only in memory for the bounded read-only request; API views and audit
+metadata expose neither ciphertext, credential references, nor credential
+hints derived from secret material. Rows in the old notification-wrapper
+format are migrated by compare-and-swap only after successful decryption and
+AEAD encryption.
+
+Platform-operator routes use a separate `SECURITY_TOOLKIT_PLATFORM_ADMIN_TOKEN`
+header credential, not tenant roles or tenant API credentials. The token is
+compared in constant time, never persisted or logged, and admin routes return
+bounded metadata only. If the variable is missing or invalid, operator access
+is unavailable; tenant owners cannot reach platform-admin operations through
+ordinary RBAC.
+
+The runtime pin `cryptography==50.0.2` is required for AES-GCM. This is a
+reviewed cryptographic recipe library; using its high-level AEAD API is
+materially safer than the previous custom XOR-based notification-secret
+wrapper. Its runtime dependency tree is pinned as `cffi==2.1.0` and
+`pycparser==3.0` in both `requirements.txt` and `pyproject.toml`. These three
+packages are the base runtime dependencies for authenticated encryption. The
+optional cloud extras add only the selected provider SDKs; they are never
+installed by the base `requirements.txt` and do not imply live credentials or
+provider connectivity.
 
 `interfaces/secrets.py` provides resolution only:
 
@@ -69,6 +119,36 @@ false confidence and is worse than storing plaintext knowingly.
 to the process tree and may appear in crash dumps. A Vault/KMS provider
 implementing the same interface is the production path and is **not yet
 written**.
+
+## Cloud and ticketing adapters
+
+Live cloud inventory is disabled unless an explicit account credential
+reference or encrypted provider credential is configured and the matching SDK
+extra is installed. AWS, Azure and GCP adapters issue read-only, bounded,
+scoped requests and return only provider-confirmed resources. AWS validates
+STS account identity; Azure and GCP use subscription/project-scoped inventory
+requests and reject mismatched resource scope. Pagination, request timeouts,
+SDK retries and resource ceilings are bounded. SDK failures map to safe error
+codes and never become an empty-success inventory. The deterministic
+`fixture` provider remains test/demo-only and is not used as a live fallback.
+
+Install only the required exact-pinned optional extra, for example
+`pip install '.[cloud-aws]'`, `pip install '.[cloud-azure]'` or
+`pip install '.[cloud-gcp]'`. The pins are `boto3==1.43.108`,
+`azure-identity==1.26.0`, `azure-mgmt-resource==26.0.0`,
+`google-auth==2.59.1` and `google-cloud-asset==4.5.0`. Provider SDK versions
+and their resolved transitive dependencies must be reviewed and updated as a
+unit; cloud calls are not exercised against live customer accounts in the
+repository test suite.
+
+Ticketing currently supports an opt-in Jira Cloud adapter over HTTPS. It
+requires a deployment-provided secret-reference resolver; this project does
+not treat the metadata-only secret registry as a credential vault. Jira
+issue identity uses a stable finding label for create/update idempotency,
+linking checks for an existing issue relation, and close operations select a
+provider-confirmed `done` transition. No external ticket is claimed as created,
+updated, linked or closed before Jira returns success. No live Jira site or
+credential is configured in this repository.
 
 ## Log redaction
 
@@ -102,10 +182,15 @@ Both are verified by `tests/test_security_baseline.py`, which fails if
 
 ## Dependency policy
 
-The runtime dependency list is **empty**. Every third-party package in a
-security tool runs with that tool's privileges. Adding one requires written
-justification here, a pinned version and a review of its transitive tree.
-Development tooling (`mypy`, `ruff`) is confined to `requirements-dev.txt`.
+The base runtime dependency list contains three exact pins:
+`cryptography==50.0.2` for AES-256-GCM and its transitive dependencies
+`cffi==2.1.0` and `pycparser==3.0`. Optional `cloud-aws`, `cloud-azure`, and
+`cloud-gcp` extras are pinned separately in `pyproject.toml`; deploy only the
+SDK families required by the account scopes being scanned. Every third-party
+package in a security tool runs with that tool's privileges; additions require
+written justification, an exact version pin and review of the resolved
+transitive tree. Development tooling (`mypy`, `ruff`) is confined to
+`requirements-dev.txt`.
 
 ## Explicitly out of scope
 
@@ -118,6 +203,9 @@ register a scanner whose name or kind describes offensive automation.
 * No certifications (SOC 2, ISO 27001, PCI DSS, FedRAMP). None. See
   `SECURITY.md`.
 * No third-party penetration test has been performed.
-* No encryption at rest is implemented.
+* Authenticated encryption protects the notification webhook-secret field;
+  it does not encrypt the entire database, backups, or other platform data.
+* No hosted Vault/KMS key provider is included. Deployments must supply and
+  rotate keys through a protected environment or an injected provider.
 * No authentication implementation ships in the foundation layer — only the
   deny-by-default policy contract.

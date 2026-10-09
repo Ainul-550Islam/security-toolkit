@@ -20,6 +20,8 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = os.path.join(os.path.dirname(HERE), "python")
@@ -34,6 +36,7 @@ import rbac  # noqa: E402
 import authz  # noqa: E402
 import identity as identity_mod  # noqa: E402
 import dashboard  # noqa: E402
+import main as main_cli  # noqa: E402
 import platform_service as pf  # noqa: E402
 
 from test_foundation import make_service  # noqa: E402
@@ -632,6 +635,8 @@ class TestApiCredentials(unittest.TestCase):
                                             project_id=proj.id, actor="test")
         ctx = self.authz.context_from_secret(out["secret"])
         self.assertIsNotNone(self.authz.require_project(ctx, proj.id))
+        with self.assertRaises(errors.AuthorizationError):
+            self.authz.require_org(ctx, self.org.id)
         other = self.svc.project_create(self.org.id, "pb2")
         with self.assertRaises(errors.AuthorizationError):
             self.authz.require_project(ctx, other.id)
@@ -873,11 +878,12 @@ class TestSessions(unittest.TestCase):
 
 
 class TestDashboardSecurity(unittest.TestCase):
-    def test_bearer_and_cookie_and_legacy_query(self):
+    def test_bearer_and_cookie_and_query_compatibility_gate(self):
         self.assertTrue(dashboard.check_access("tok123", "tok123", "", ""))
         self.assertTrue(dashboard.check_access("tok123", "", "tok123", ""))
-        # legacy query transport still accepted (existing frontend)
-        self.assertTrue(dashboard.check_access("tok123", "", "", "tok123"))
+        self.assertFalse(dashboard.check_access("tok123", "", "", "tok123"))
+        self.assertTrue(dashboard.check_access(
+            "tok123", "", "", "tok123", allow_legacy_query=True))
 
     def test_wrong_token_rejected(self):
         self.assertFalse(dashboard.check_access("tok123", "tok124", "", ""))
@@ -887,6 +893,23 @@ class TestDashboardSecurity(unittest.TestCase):
     def test_local_mode_no_token(self):
         self.assertTrue(dashboard.check_access("", "anything", "x", "y"))
 
+    def test_dashboard_token_uses_environment_when_cli_is_omitted(self):
+        self.assertEqual(
+            dashboard.configured_dashboard_token(
+                None,
+                {"SECURITY_TOOLKIT_DASHBOARD_TOKEN": "env-token"},
+            ),
+            "env-token",
+        )
+        self.assertEqual(
+            dashboard.configured_dashboard_token(
+                "cli-token",
+                {"SECURITY_TOOLKIT_DASHBOARD_TOKEN": "env-token"},
+            ),
+            "cli-token",
+        )
+        self.assertEqual(dashboard.configured_dashboard_token(None, {}), "")
+
     def test_query_token_stripped_from_logs(self):
         self.assertEqual(
             dashboard.safe_request_line("/api/scans?t=SECRET123&x=1"),
@@ -894,6 +917,112 @@ class TestDashboardSecurity(unittest.TestCase):
         self.assertEqual(dashboard.safe_request_line("/"), "/")
         blob = dashboard.safe_request_line("/export/a/b?t=SECRET")
         self.assertNotIn("SECRET", blob)
+
+    def test_legacy_dashboard_api_no_longer_appends_query_tokens(self):
+        with open(dashboard.__file__, encoding="utf-8") as source_file:
+            source = source_file.read()
+        self.assertNotIn("location.search.match(/[?&]t=", source)
+        self.assertNotIn("u+(u.includes('?')?'&':'?')+'t='+q", source)
+
+    def test_persisted_provider_error_is_safely_summarized(self):
+        self.assertEqual(
+            dashboard.safe_stored_error("/srv/private/token=secret"),
+            "operation_failed",
+        )
+        self.assertEqual(dashboard.safe_stored_error(""), "")
+
+    def test_access_log_never_writes_query_credentials(self):
+        class Fake:
+            client_address = ("127.0.0.1", 12345)
+            command = "GET"
+            path = "/api/scans?t=SECRET123&filter=all"
+            request_version = "HTTP/1.1"
+
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            dashboard.Handler.log_message(Fake(), "%s", "ignored")
+        logged = output.getvalue()
+        self.assertIn("GET /api/scans HTTP/1.1", logged)
+        self.assertNotIn("SECRET123", logged)
+        self.assertNotIn("filter=all", logged)
+
+    def test_handler_error_is_redacted_and_correlated(self):
+        class Fake:
+            headers = {"X-Request-ID": "request-test-123"}
+            path = "/"
+            scans = []
+            tenants = {}
+            root = "."
+            request_id = ""
+
+            def authorized(self):
+                return True
+
+            def send(self, code, body, *args, **kwargs):
+                self.response = (code, body)
+                return self.response
+
+        fake = Fake()
+        with patch.object(dashboard.Handler, "refresh", return_value=None), \
+                patch.object(
+                    dashboard,
+                    "render_overview",
+                    side_effect=RuntimeError("/private/path SECRET123"),
+                ), \
+                patch.object(dashboard.logging, "getLogger") as get_logger:
+            dashboard.Handler.route(fake, "GET")
+        self.assertEqual(fake.response[0], 500)
+        self.assertNotIn(b"SECRET123", fake.response[1])
+        self.assertNotIn(b"private/path", fake.response[1])
+        self.assertEqual(fake.request_id, "request-test-123")
+        get_logger.assert_called_once_with("security_toolkit.dashboard")
+        get_logger.return_value.error.assert_called_once()
+
+    def test_json_error_contains_request_id(self):
+        class Fake:
+            request_id = "request-test-789"
+
+            def _request_id(self):
+                return self.request_id
+
+            def send(self, code, body, ctype):
+                self.response = (code, body, ctype)
+
+        fake = Fake()
+        dashboard.Handler.json_out(fake, 500, {"error": "internal_error"})
+        self.assertEqual(fake.response[0], 500)
+        self.assertEqual(
+            json.loads(fake.response[1])["request_id"], "request-test-789")
+
+    def test_response_has_request_id_and_secure_headers(self):
+        class Fake:
+            headers = {"X-Request-ID": "request-test-456"}
+            request_id = ""
+            wfile = io.BytesIO()
+
+            def _request_id(self):
+                self.request_id = dashboard.safe_request_id(
+                    self.headers.get("X-Request-ID", ""))
+                return self.request_id
+
+            def send_response(self, code):
+                self.status = code
+
+            def send_header(self, name, value):
+                self.headers_sent[name.lower()] = value
+
+            def end_headers(self):
+                return None
+
+        fake = Fake()
+        fake.headers_sent = {}
+        dashboard.Handler.send(fake, 200, b"ok")
+        self.assertEqual(fake.headers_sent["x-request-id"], "request-test-456")
+        self.assertEqual(fake.headers_sent["x-content-type-options"], "nosniff")
+        self.assertIn("frame-ancestors 'none'", fake.headers_sent["content-security-policy"])
+        self.assertEqual(fake.headers_sent["cross-origin-opener-policy"], "same-origin")
+        self.assertEqual(fake.headers_sent["cache-control"], "no-store")
+        self.assertEqual(dashboard.Handler.version_string(Fake()), "SecurityToolkit")
 
     def test_same_origin_check(self):
         class Fake:
@@ -913,8 +1042,10 @@ class TestDashboardSecurity(unittest.TestCase):
     def test_security_headers_present_in_send(self):
         # headers are emitted in send(); verify all names exist as literals
         src = open(os.path.join(PY, "dashboard.py"), encoding="utf-8").read()
-        for h in ("Content-Security-Policy", "X-Content-Type-Options",
-                  "X-Frame-Options", "Referrer-Policy", "Permissions-Policy",
+        for h in ("Content-Security-Policy", "X-Request-ID",
+                  "X-Content-Type-Options", "X-Frame-Options",
+                  "Referrer-Policy", "Permissions-Policy",
+                  "Cross-Origin-Opener-Policy", "Cross-Origin-Resource-Policy",
                   "Cache-Control"):
             self.assertIn(h, src)
 
@@ -922,6 +1053,37 @@ class TestDashboardSecurity(unittest.TestCase):
         src = open(os.path.join(PY, "dashboard.py"), encoding="utf-8").read()
         self.assertNotIn("Access-Control-Allow-Origin: *", src)
         self.assertNotIn("ACAO", src)
+
+
+class TestDashboardCommandSecurity(unittest.TestCase):
+    def test_cli_token_is_passed_to_child_via_environment_not_argv(self):
+        args = SimpleNamespace(
+            root="results",
+            host="127.0.0.1",
+            port=8080,
+            token="cli-token",
+            jobs_db=None,
+            jobs_org="",
+            intel_db=None,
+            intel_org="",
+        )
+        warning = io.StringIO()
+        with patch.dict(os.environ, {}, clear=False) as environment:
+            with patch.object(main_cli, "run_py") as run_child, \
+                    contextlib.redirect_stderr(warning):
+                main_cli.cmd_dashboard(args)
+            self.assertEqual(
+                environment["SECURITY_TOOLKIT_DASHBOARD_TOKEN"], "cli-token")
+        self.assertEqual(
+            run_child.call_args.args,
+            (
+                "dashboard.py",
+                "--root", "results",
+                "--host", "127.0.0.1",
+                "--port", "8080",
+            ),
+        )
+        self.assertIn("process inspection", warning.getvalue())
 
 
 class TestPhase2SecurityRegressions(unittest.TestCase):

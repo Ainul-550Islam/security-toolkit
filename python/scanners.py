@@ -116,27 +116,38 @@ class ScannerRegistry:
         self._add(Profile(
             "cloud-scan", "Cloud account inventory + CLOUD rule assessment "
             "(in-process; fixture/aws/azure/gcp providers)", ["cloud_assess"],
-            timeout=300, in_process=True))
+            timeout=300, in_process=True,
+            permissions_required=("scan.create", "cloud.scan.run")))
         self._add(Profile(
             "cloud-inventory", "Cloud account inventory refresh "
             "(in-process; no assessment)", ["cloud_inventory"],
-            timeout=300, in_process=True))
+            timeout=300, in_process=True,
+            permissions_required=("scan.create", "cloud.inventory.run")))
         self._add(Profile(
             "container-scan", "Container image assessment (digest identity; "
             "supplied package/CVE inventory, in-process)",
-            ["container_assess"], timeout=300, in_process=True))
+            ["container_assess"], timeout=300, in_process=True,
+            permissions_required=("scan.create", "container.scan.run")))
         self._add(Profile(
             "kubernetes-scan", "Kubernetes declarative manifest assessment "
             "(in-process; bounded YAML, secret metadata only)",
-            ["k8s_assess"], timeout=300, in_process=True))
+            ["k8s_assess"], timeout=300, in_process=True,
+            permissions_required=("scan.create", "kubernetes.scan.run")))
         self._add(Profile(
             "iac-scan", "Infrastructure-as-Code assessment (Terraform/CFN; "
             "in-process; secrets always redacted)", ["iac_assess"],
-            timeout=300, in_process=True))
+            timeout=300, in_process=True,
+            permissions_required=("scan.create", "iac.scan.run")))
         self._add(Profile(
             "posture-snapshot", "Project security posture snapshot from "
             "existing findings + risk engine (in-process; no new stores)",
-            ["posture_snapshot"], timeout=120, in_process=True))
+            ["posture_snapshot"], timeout=120, in_process=True,
+            permissions_required=("scan.create", "analytics.read")))
+        self._add(Profile(
+            "report-generation", "Generate and persist a bounded report "
+            "snapshot in-process through ReportService",
+            ["report_generation"], timeout=900, in_process=True,
+            permissions_required=("report.generate",)))
         # ------------------------------------------------------ Phase 12
         # Federation bulk operations: bounded, checkpointed orchestration
         # of bulk export/import/classify/retention-preview through the

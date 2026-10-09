@@ -702,8 +702,8 @@ class AlertService:
         if not rule.get("notify", 1):
             return
         rows = self.db.query(
-            "SELECT state, suppressed_until, cooldown_until FROM alerts "
-            "WHERE id=? LIMIT 1", (alert_id,))
+            "SELECT state, suppressed_until, cooldown_until, org_id "
+            "FROM alerts WHERE id=? LIMIT 1", (alert_id,))
         if not rows:
             return
         r = rows[0]
@@ -718,9 +718,14 @@ class AlertService:
         try:
             dispatcher = self._notifier
             if dispatcher is None:
-                import notify as _notify
-                dispatcher = _notify.NotificationService(self.svc)
-            dispatcher.dispatch_alert(alert_id, event_id, rule)
+                from services.notifications import NotificationService
+                dispatcher = NotificationService(self.svc)
+            dispatcher.dispatch_alert(
+                alert_id,
+                event_id,
+                rule,
+                org_id=str(r.get("org_id", "") or ""),
+            )
         except Exception:
             metrics.inc("notifications_failed")
         cooldown_min = max(0, int(rule.get("cooldown_minutes") or 0))

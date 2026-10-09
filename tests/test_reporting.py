@@ -599,6 +599,12 @@ class TestReportLifecycle(P6Base):
 
 # ---------------------------------------------------------------------------
 class TestAnalytics(P6Base):
+    def test_default_trend_window_anchors_to_historical_end(self):
+        cutoff = "2026-09-05T00:00:00Z"
+        start, end = analytics.bounded_range("", cutoff)
+        self.assertEqual(start, "2026-08-06T00:00:00Z")
+        self.assertEqual(end, cutoff)
+
     def test_posture_deterministic_and_versioned(self):
         a = self.anasvc.posture(self.proj.id,
                                 cutoff="2026-09-05T00:00:00Z")

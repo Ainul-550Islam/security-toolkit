@@ -25,8 +25,16 @@
 
 from __future__ import annotations
 
+import os
 import re
+import sys
 import threading
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from services.crypto import CryptoNotConfigured, CryptoService, EncryptedValueError
 
 import errors
 import models
@@ -91,7 +99,11 @@ class CloudProvider:
             f"credentials / workload identity via a credential reference)")
 
     def close(self) -> None:
-        pass
+        """Drop transient credential references after the bounded provider call."""
+        self.credentials.clear()
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(provider_id={self.provider_id!r}, credentials=[REDACTED])"
 
 
 _PROVIDERS: dict[str, type[CloudProvider]] = {}
@@ -198,62 +210,113 @@ class FixtureProvider(CloudProvider):
 
 
 # ============================================================================
-# In-place providers (aws / azure / gcp) — explicit, never silent
+# Live provider adapters (aws / azure / gcp) — explicit, read-only, bounded
 # ============================================================================
 class _EnvDetectProvider(CloudProvider):
-    """Base for in-place adapters: validates provider id, detects an
-    environment credential reference, and fails EXPLICITLY when live
-    inventory is not possible. No network access, no mutation, no secret
-    values in memory beyond what the environment provides."""
+    """Base for optional SDK adapters with explicit credential references."""
 
     env_vars: tuple[str, ...] = ()
 
     def resolve_credentials(self) -> dict:
-        ref = self.account.credential_ref
+        if self.credentials.get("credential_secret"):
+            return self.credentials
+        ref = str(self.account.credential_ref or "")
+        if ref in {"workload_identity", "default"}:
+            return self.credentials
         if ref.startswith("env:"):
-            present = [v for v in self.env_vars
-                       if v in __import__("os").environ]
-            if not present:
-                raise AssessmentError(
-                    FAIL_INVALID_CREDS,
-                    f"provider '{self.provider_id}': environment credential "
-                    f"reference '{ref}' set but no variable present "
-                    f"(expected one of: {', '.join(self.env_vars)})")
-            return {"ref": ref, "env": present}
+            present = [name for name in self.env_vars
+                       if name in os.environ and os.environ.get(name)]
+            if present:
+                return self.credentials
+            raise AssessmentError(
+                FAIL_INVALID_CREDS,
+                f"provider '{self.provider_id}': referenced environment "
+                "credentials are unavailable",
+            )
         raise AssessmentError(
             FAIL_CLOUD_UNAVAILABLE,
-            f"provider '{self.provider_id}': only 'env:' credential "
-            f"references are supported by the in-place adapter; use "
-            f"short-lived / workload-identity credentials")
+            f"provider '{self.provider_id}': no supported credential "
+            "reference or encrypted credential material is configured",
+        )
 
     def inventory(self) -> list[dict]:
         self.resolve_credentials()
-        raise AssessmentError(
-            FAIL_CLOUD_UNAVAILABLE,
-            f"provider '{self.provider_id}': live inventory adapter not "
-            f"bundled (assessment-only platform; provide the SDK adapter "
-            f"through CloudProvider.register_provider)")
+        try:
+            if self.provider_id == "aws":
+                from services.cloud_aws import AwsInventoryAdapter
+                adapter = AwsInventoryAdapter()
+            elif self.provider_id == "azure":
+                from services.cloud_azure import AzureInventoryAdapter
+                adapter = AzureInventoryAdapter()
+            elif self.provider_id == "gcp":
+                from services.cloud_gcp import GcpInventoryAdapter
+                adapter = GcpInventoryAdapter()
+            else:
+                raise AssessmentError(FAIL_CLOUD_UNAVAILABLE,
+                                      "cloud provider adapter is unavailable")
+            return adapter.inventory(self.account, self.credentials)
+        except AssessmentError:
+            raise
+        except Exception as exc:
+            from services.cloud_common import CloudAdapterError
+            if not isinstance(exc, CloudAdapterError):
+                raise AssessmentError(
+                    FAIL_INVENTORY,
+                    f"provider '{self.provider_id}': adapter operation failed",
+                ) from None
+            failure_codes = {
+                "not_configured": (FAIL_CLOUD_UNAVAILABLE,
+                                   "provider SDK or credentials are not configured"),
+                "invalid_credentials": (FAIL_INVALID_CREDS,
+                                        "provider credentials are invalid"),
+                "permission_denied": (FAIL_PERMISSION_DENIED,
+                                      "provider permissions are insufficient"),
+                "scope_mismatch": (FAIL_INVALID_CREDS,
+                                   "provider identity does not match the account"),
+                "resource_limit_exceeded": (FAIL_RESOURCE_LIMIT,
+                                            "provider inventory exceeded its configured limit"),
+                "timeout": (FAIL_INVENTORY,
+                            "provider inventory exceeded its time limit"),
+                "rate_limited": (FAIL_INVENTORY,
+                                 "provider rate limit was reached"),
+                "unavailable": (FAIL_CLOUD_UNAVAILABLE,
+                                "provider service is unavailable"),
+                "inventory_failed": (FAIL_INVENTORY,
+                                     "provider inventory operation failed"),
+            }
+            code, message = failure_codes.get(
+                exc.code,
+                (FAIL_INVENTORY, "provider inventory operation failed"),
+            )
+            raise AssessmentError(code, message) from None
 
 
 @register_provider
 class AwsProvider(_EnvDetectProvider):
     provider_id = "aws"
-    display_name = "AWS (in-place adapter stub)"
-    env_vars = ("AWS_ACCESS_KEY_ID", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE")
+    display_name = "AWS inventory adapter"
+    env_vars = (
+        "AWS_ACCESS_KEY_ID", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "AWS_PROFILE",
+    )
 
 
 @register_provider
 class AzureProvider(_EnvDetectProvider):
     provider_id = "azure"
-    display_name = "Azure (in-place adapter stub)"
-    env_vars = ("AZURE_CLIENT_ID", "AZURE_FEDERATED_TOKEN_FILE")
+    display_name = "Azure subscription inventory adapter"
+    env_vars = (
+        "AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE",
+    )
 
 
 @register_provider
 class GcpProvider(_EnvDetectProvider):
     provider_id = "gcp"
-    display_name = "GCP (in-place adapter stub)"
-    env_vars = ("GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_OAUTH_ACCESS_TOKEN")
+    display_name = "Google Cloud project inventory adapter"
+    env_vars = (
+        "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_OAUTH_ACCESS_TOKEN",
+    )
 
 
 # ============================================================================
@@ -752,6 +815,7 @@ class CloudSecurityService:
                  limits: dict | None = None):
         self.svc = platform
         self.db = platform.db
+        self.crypto = CryptoService()
         import identity as identity_mod
         self.limiter = limiter or identity_mod.RateLimiter(max_keys=8192)
         self.limits = {"scan": (10, 300)}            # per org+account
@@ -801,10 +865,12 @@ class CloudSecurityService:
             display_name=display_name[:128],
             region_scope=list(region_scope or []),
             credential_ref=credential_ref[:128])
-        enc, hint = self._store_credential(credential_secret)
+        account.finalize()
+        enc, hint = self._store_credential(
+            credential_secret, org_id=org_id, account_id=account.id
+        )
         account.credential_enc = enc
         account.credential_hint = hint
-        account.finalize()
         try:
             self.db.execute(
                 "INSERT INTO cloud_accounts (id, org_id, provider, "
@@ -830,24 +896,101 @@ class CloudSecurityService:
                               "account_identifier": account.account_identifier})
         return account
 
-    def _store_credential(self, secret: str | None) -> tuple[str, str]:
-        """Encrypt at rest (existing notify key-wrap); hint = non-secret
-        prefix only. Never keep the plaintext longer than needed."""
+    @staticmethod
+    def _credential_aad(org_id: str, account_id: str) -> str:
+        tenant = str(org_id or "")
+        account = str(account_id or "")
+        if not tenant or not account or ":" in tenant or ":" in account:
+            raise errors.ValidationError("cloud credential context is invalid")
+        return f"cloud-account-credential:v1:{tenant}:{account}"
+
+    def _store_credential(
+        self,
+        secret: str | None,
+        *,
+        org_id: str,
+        account_id: str,
+    ) -> tuple[str, str]:
+        """Encrypt provider material with tenant/account-bound AES-GCM."""
         if not secret:
             return "", ""
+        if not isinstance(secret, str) or len(secret.encode("utf-8")) > 16_384:
+            raise errors.ValidationError("cloud credential is invalid or too large")
+        context = self._credential_aad(org_id, account_id)
+        try:
+            blob = self.crypto.encrypt_text(secret, associated_data=context)
+        except CryptoNotConfigured:
+            raise errors.ConfigurationError(
+                "cloud credential encryption is not configured"
+            ) from None
+        except EncryptedValueError:
+            raise errors.ValidationError(
+                "cloud credential encryption failed"
+            ) from None
+        return blob, "configured"
+
+    def _provider_credentials(self, account: models.CloudAccount) -> dict:
+        """Resolve encrypted account material only for the provider call."""
+        result = {"ref": str(account.credential_ref or "")}
+        ciphertext = str(account.credential_enc or "")
+        if not ciphertext:
+            return result
+        context = self._credential_aad(account.org_id, account.id)
+        if ciphertext.startswith("st-aesgcm:"):
+            try:
+                result["credential_secret"] = self.crypto.decrypt_text(
+                    ciphertext, associated_data=context
+                )
+            except CryptoNotConfigured:
+                raise errors.ConfigurationError(
+                    "cloud credential decryption is not configured"
+                ) from None
+            except EncryptedValueError:
+                raise errors.PersistenceError(
+                    "cloud credential authentication failed"
+                ) from None
+            return result
+
+        # Existing rows use the retired, unauthenticated notification wrapper.
+        # Read it only for one-time migration, then replace it with tenant- and
+        # account-bound AEAD before giving plaintext to a provider.
         try:
             import notify
-            blob = notify._encrypt_secret(str(secret), self.svc.db_path)
-        except Exception as e:
-            raise errors.ValidationError(
-                "credential encryption failed: "
-                f"secret_redaction_failure") from e
-        # hint is a NON-REVERSIBLE fingerprint — never derived characters
-        # of the secret itself (views can show it without leaking anything)
-        import hashlib
-        hint = "enc:" + hashlib.sha256(
-            str(secret).encode("utf-8")).hexdigest()[:8]
-        return str(blob), str(hint)[:160]
+            legacy_plaintext = notify._decrypt_secret(
+                ciphertext, self.svc.db_path
+            )
+            migrated = self.crypto.encrypt_text(
+                legacy_plaintext, associated_data=context
+            )
+        except errors.ConfigurationError:
+            raise errors.ConfigurationError(
+                "legacy cloud credential cannot be migrated"
+            ) from None
+        except CryptoNotConfigured:
+            raise errors.ConfigurationError(
+                "cloud credential migration is not configured"
+            ) from None
+        except EncryptedValueError:
+            raise errors.PersistenceError(
+                "cloud credential migration failed"
+            ) from None
+        changed = self.db.execute_affected(
+            "UPDATE cloud_accounts SET credential_enc=?, updated_at=? "
+            "WHERE id=? AND org_id=? AND credential_enc=?",
+            (migrated, models.utcnow(), account.id, account.org_id, ciphertext),
+        )
+        if changed != 1:
+            raise errors.PersistenceError("cloud credential changed during migration")
+        self._audit(
+            "cloud.credentials.migrated",
+            object_type="cloud_account",
+            object_id=account.id,
+            org_id=account.org_id,
+            actor="crypto:migration",
+            metadata={"cipher_version": "v1"},
+        )
+        result["credential_secret"] = legacy_plaintext
+        return result
 
     def account_get(self, org_id: str, account_id: str) -> models.CloudAccount:
         rows = self.db.query(
@@ -880,7 +1023,9 @@ class CloudSecurityService:
         if region_scope is not None:
             acct.region_scope = [str(r)[:64] for r in region_scope][:64]
         if credential_secret:
-            enc, hint = self._store_credential(credential_secret)
+            enc, hint = self._store_credential(
+                credential_secret, org_id=org_id, account_id=acct.id
+            )
             if enc:
                 acct.credential_enc = enc
                 acct.credential_hint = hint
@@ -925,17 +1070,42 @@ class CloudSecurityService:
             cls = get_provider_class(acct.provider)
         except errors.ValidationError as e:
             raise AssessmentError(FAIL_CLOUD_UNAVAILABLE, str(e)) from e
+        provider = None
+        credentials: dict = {}
         try:
-            provider = cls(acct, {"ref": acct.credential_ref})
+            credentials = self._provider_credentials(acct)
+            provider = cls(acct, credentials)
             raw = provider.inventory()
-            provider.close()
+            if not isinstance(raw, list):
+                raise AssessmentError(
+                    FAIL_INVENTORY, "provider returned an invalid inventory shape"
+                )
         except AssessmentError:
             raise
-        except errors.SecurityToolkitError as e:
-            raise AssessmentError(FAIL_INVENTORY, str(e)) from e
-        except Exception as e:
-            raise AssessmentError(FAIL_INVENTORY,
-                                  f"inventory raised {type(e).__name__}") from e
+        except errors.ConfigurationError:
+            raise AssessmentError(
+                FAIL_CLOUD_UNAVAILABLE, "cloud credential service is unavailable"
+            ) from None
+        except errors.PersistenceError:
+            raise AssessmentError(
+                FAIL_INVALID_CREDS, "cloud credential could not be authenticated"
+            ) from None
+        except errors.SecurityToolkitError:
+            raise AssessmentError(
+                FAIL_INVENTORY, "provider operation failed"
+            ) from None
+        except Exception as exc:
+            raise AssessmentError(
+                FAIL_INVENTORY,
+                f"provider operation raised {type(exc).__name__[:80]}",
+            ) from None
+        finally:
+            if provider is not None:
+                try:
+                    provider.close()
+                except Exception:
+                    pass
+            credentials.clear()
         resources = normalize_inventory(raw, provider=acct.provider,
                                         account=acct.account_identifier,
                                         default_region=(acct.region_scope

@@ -166,10 +166,10 @@ CATEGORIES = ("injection", "xss", "csrf", "auth", "access_control", "tls",
 SCAN_STATUSES = ("pending", "queued", "running", "paused", "cancelling",
                  "completed", "failed", "cancelled")
 SCAN_TRANSITIONS = {
-    "pending": {"queued", "running", "failed", "cancelled", "cancelling"},
-    "queued": {"running", "failed", "cancelled", "cancelling"},
+    "pending": {"queued", "running", "paused", "failed", "cancelled", "cancelling"},
+    "queued": {"running", "paused", "failed", "cancelled", "cancelling"},
     "running": {"paused", "completed", "failed", "cancelled", "cancelling"},
-    "paused": {"running", "failed", "cancelled", "cancelling"},
+    "paused": {"queued", "running", "failed", "cancelled", "cancelling"},
     "cancelling": {"cancelled", "failed"},
     "completed": set(),
     "failed": {"running"},       # retry allowed
@@ -1209,7 +1209,10 @@ class AuditEvent:
     ts: str = ""
 
     ACTIONS = frozenset({
-        "organization.created", "project.created", "asset.created",
+        "organization.created", "organization.updated",
+        "organization.preferences.updated",
+        "project.created", "project.updated", "project.archived",
+        "project.restored", "asset.created",
         "scope.changed", "scope.checked", "scope.denied",
         "scan.created", "scan.started", "scan.paused", "scan.resumed",
         "scan.cancelled", "scan.completed", "scan.failed",
@@ -1218,6 +1221,7 @@ class AuditEvent:
         "configuration.changed", "authentication.denied", "scan.updated",
         # --- Phase 2 identity / RBAC / auth events (no secrets ever) ---
         "user.created", "user.updated", "user.disabled", "user.enabled",
+        "user.suspended", "user.deactivated", "user.pending",
         "user.role_changed", "user.password_changed",
         "login_success", "login_failure", "logout",
         "session.created", "session.revoked", "session.expired",
@@ -1231,6 +1235,7 @@ class AuditEvent:
         "job.cancel_requested", "job.cancelled", "job.completed",
         "job.dead_lettered", "stage.completed", "stage.failed",
         "worker.started", "worker.stopped",
+        "platform.maintenance.jobs_swept",
         # --- Phase 4 intelligence events (user-driven changes only; the
         # automatic correlation/cluster/risk pipeline uses metrics, never
         # floods the immutable audit log) -------------------------------
@@ -1253,10 +1258,11 @@ class AuditEvent:
         "alert.suppression_expired", "alert.reopened", "alert.open",
         "alert.acknowledged", "alert.investigating", "alert.resolved",
         "alert.suppressed", "alert.expired",
-        "notification.settings.updated", "notification.retried",
+        "notification.settings.updated", "notification.secret.migrated",
+        "notification.retried",
         "remediation.created", "remediation.assigned",
         "remediation.status_changed", "remediation.due_changed",
-        "remediation.verification_requested",
+        "remediation.comment_added", "remediation.verification_requested",
         "remediation.verification_result", "remediation.sla.updated",
         "retention.sweep",
         # --- Phase 6 reporting / compliance evidence (metadata only) ----
@@ -1292,6 +1298,7 @@ class AuditEvent:
         # --- Phase 9 cloud / container / Kubernetes / IaC (metadata) ------
         "cloud.account.created", "cloud.account.updated",
         "cloud.account.deleted", "cloud.credentials.updated",
+        "cloud.credentials.migrated",
         "cloud.scan.started", "cloud.scan.completed",
         "cloud.inventory.refreshed",
         "container.image_registered", "container.scan.started",
@@ -1354,6 +1361,8 @@ class AuditEvent:
         "integration.delivery.failed",
         "integration.inbound.accepted", "integration.inbound.rejected",
         "integration.replay_blocked", "integration.health_changed",
+        "ticketing.issue.created", "ticketing.issue.updated",
+        "ticketing.issue.closed", "ticketing.issue.linked",
     })
 
     def validate(self):

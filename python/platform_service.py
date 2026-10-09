@@ -31,6 +31,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from services.database import DatabaseService
+from services.migrations import MigrationRunner
 
 import errors
 import models
@@ -44,8 +52,11 @@ import store
 class PlatformService:
     def __init__(self, db_path: str | None = None):
         self.db_path = db_path or sec_config.platform_db_path()
-        self.db = store.Database(self.db_path)
-        self.db.migrate()
+        backend = store.Database(self.db_path)
+        self.db = DatabaseService(backend)
+        self.migration_report = MigrationRunner(
+            self.db, expected_version=len(store.MIGRATIONS)
+        ).run()
 
     # ------------------------------------------------------------------ org
     def org_create(self, name: str) -> models.Organization:
@@ -80,7 +91,8 @@ class PlatformService:
 
     # ------------------------------------------------------------- project
     def project_create(self, org_id: str, name: str, description: str = "",
-                       scope_policy: dict | None = None) -> models.Project:
+                       scope_policy: dict | None = None,
+                       actor: str = "cli") -> models.Project:
         self.org_require(org_id)
         proj = models.Project(org_id=org_id, name=name, description=description,
                               scope_policy=dict(scope_policy or {}))
@@ -100,7 +112,7 @@ class PlatformService:
                     f"Project already exists in org: {name}") from e
             raise errors.PersistenceError(f"project create failed: {e}") from e
         self.audit("project.created", object_type="project", object_id=proj.id,
-                   org_id=proj.org_id, project_id=proj.id,
+                   org_id=proj.org_id, project_id=proj.id, actor=actor,
                    metadata={"name": proj.name})
         return proj
 
@@ -128,17 +140,21 @@ class PlatformService:
         return self.project_get(project_id)
 
     # --------------------------------------------------------------- scope
-    def scope_set(self, project_id: str, allow, deny) -> dict:
+    def scope_set(self, project_id: str, allow, deny, *,
+                  actor: str = "cli") -> dict:
         self.project_require(project_id)
+        project = self.project_get(project_id)
         policy = scope_mod.ScopePolicy(allow, deny,
                                        name=f"project:{project_id}")
         data = policy.to_dict()
         with self.db.transaction() as conn:
             conn.execute("UPDATE projects SET scope_json=?, updated_at=? "
-                         "WHERE id=?",
-                         (store.dumps(data), models.utcnow(), project_id))
+                         "WHERE id=? AND org_id=?",
+                         (store.dumps(data), models.utcnow(), project_id,
+                          project.org_id))
         self.audit("scope.changed", object_type="project", object_id=project_id,
-                   project_id=project_id, metadata={"scope": data})
+                   org_id=project.org_id, project_id=project_id, actor=actor,
+                   metadata={"scope": data})
         return data
 
     def scope_get(self, project_id: str) -> scope_mod.ScopePolicy:
@@ -159,7 +175,8 @@ class PlatformService:
 
     # ---------------------------------------------------------------- asset
     def asset_add(self, project_id: str, asset_type: str, value: str,
-                  metadata: dict | None = None, display: str = "") -> models.Asset:
+                  metadata: dict | None = None, display: str = "",
+                  actor: str = "cli") -> models.Asset:
         self.project_require(project_id)
         asset = models.Asset(project_id=project_id, asset_type=asset_type,
                              value=value, display=display,
@@ -176,7 +193,7 @@ class PlatformService:
         except Exception as e:
             raise errors.PersistenceError(f"asset add failed: {e}") from e
         self.audit("asset.created", object_type="asset", object_id=asset.id,
-                   project_id=project_id,
+                   project_id=project_id, actor=actor,
                    metadata={"asset_type": asset.asset_type,
                              "value": asset.value})
         return asset
@@ -206,7 +223,7 @@ class PlatformService:
     # ----------------------------------------------------------------- scan
     def scan_create(self, project_id: str, profile: str,
                     scope_ref: str = "", initiator: dict | None = None,
-                    scan_id: str = "") -> models.Scan:
+                    scan_id: str = "", actor: str = "cli") -> models.Scan:
         self.project_require(project_id)
         scan = models.Scan(project_id=project_id, profile=profile,
                            scope_ref=scope_ref, initiator=dict(initiator or {}),
@@ -226,7 +243,7 @@ class PlatformService:
              store.dumps(scan.stages), store.dumps(scan.summary),
              store.dumps(scan.error), "{}"))
         self.audit("scan.created", object_type="scan", object_id=scan.id,
-                   project_id=project_id,
+                   project_id=project_id, actor=actor,
                    metadata={"profile": scan.profile})
         return scan
 

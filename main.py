@@ -272,8 +272,20 @@ def cmd_hunt(args):
 def cmd_dashboard(args):
     da = ["--root", args.root or "results", "--host", args.host or "127.0.0.1",
           "--port", str(args.port or 8080)]
-    if args.token:
-        da += ["--token", args.token]
+    if args.token is not None:
+        token = str(args.token or "").strip()
+        if not token:
+            print("[!] Dashboard token must not be empty.", file=sys.stderr)
+            sys.exit(2)
+        if len(token) > 4096:
+            print("[!] Dashboard token exceeds the maximum allowed length.", file=sys.stderr)
+            sys.exit(2)
+        os.environ["SECURITY_TOOLKIT_DASHBOARD_TOKEN"] = token
+        print(
+            "[!] A command-line token may be visible to process inspection; "
+            "prefer SECURITY_TOOLKIT_DASHBOARD_TOKEN.",
+            file=sys.stderr,
+        )
     if getattr(args, "jobs_db", None):
         da += ["--jobs-db", args.jobs_db]
         if getattr(args, "jobs_org", ""):
@@ -3741,7 +3753,11 @@ def main():
     p.add_argument("--host", default="127.0.0.1",
                    help="Bind address (default 127.0.0.1; non-loopback requires --token)")
     p.add_argument("--port", type=int, default=8080)
-    p.add_argument("--token", default=None, help="Bearer token for client-portal mode")
+    p.add_argument(
+        "--token",
+        default=None,
+        help="Bearer token for compatibility (prefer SECURITY_TOOLKIT_DASHBOARD_TOKEN env var)",
+    )
     p.add_argument("--jobs-db", default=None,
                    help="Platform SQLite — adds the Phase-3 scan-jobs ops "
                         "panel (/jobs, /api/jobs), same token gate")

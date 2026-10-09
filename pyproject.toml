@@ -10,16 +10,32 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 
-# The runtime depends on the Python standard library only. Every dependency
-# added to a security tool is code that runs with the tool's privileges, so
-# additions must be justified in docs/SECURITY_MODEL.md before they land.
-dependencies = []
+# AES-GCM is backed by pyca/cryptography rather than a local cipher. Pin its
+# mandatory CFFI/pycparser dependency tree as well; rationale is in
+# docs/SECURITY_MODEL.md.
+dependencies = [
+    "cryptography==50.0.2",
+    "cffi==2.1.0",
+    "pycparser==3.0",
+]
 
 [project.optional-dependencies]
 # Development tooling only. Never installed in production images.
 dev = [
     "mypy>=1.8",
     "ruff>=0.4",
+]
+
+# Cloud SDKs are opt-in and version-pinned; no provider connection is implied
+# by a base install. Install only the adapter families actually deployed.
+cloud-aws = ["boto3==1.43.108"]
+cloud-azure = [
+    "azure-identity==1.26.0",
+    "azure-mgmt-resource==26.0.0",
+]
+cloud-gcp = [
+    "google-auth==2.59.1",
+    "google-cloud-asset==4.5.0",
 ]
 
 [tool.setuptools]

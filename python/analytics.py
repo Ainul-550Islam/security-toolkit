@@ -134,9 +134,13 @@ def bounded_range(start: str = "", end: str = "", *,
     now = _iso(time.time())
     if not start and not end:
         return _iso(_epoch(now) - DEFAULT_TREND_DAYS * 86400), now
-    s = validate_ts(start, label="start") if start else \
-        _iso(_epoch(now) - DEFAULT_TREND_DAYS * 86400)
     e = validate_ts(end, label="end") if end else now
+    # When an explicit historical end is supplied without a start, anchor the
+    # default window to that end rather than wall-clock time. This keeps
+    # fixed-cutoff reports deterministic and prevents start > end once the
+    # cutoff is more than 30 days behind the current clock.
+    s = validate_ts(start, label="start") if start else \
+        _iso(_epoch(e) - DEFAULT_TREND_DAYS * 86400)
     if _epoch(s) > _epoch(e):
         raise errors.ValidationError(
             "range_invalid: start must be before end")

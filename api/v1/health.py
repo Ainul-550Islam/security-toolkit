@@ -25,23 +25,30 @@ def livez(service: HealthService) -> tuple[int, dict[str, Any]]:
     return HTTP_OK, service.liveness()
 
 
+def _readiness_code(body: dict[str, Any]) -> int:
+    """Treat absent or non-boolean readiness as unavailable (fail closed)."""
+    return HTTP_OK if body.get("ready") is True else HTTP_SERVICE_UNAVAILABLE
+
+
 def readyz(service: HealthService) -> tuple[int, dict[str, Any]]:
     """Readiness probe. 503 when a required dependency is not healthy."""
     body = service.readiness()
-    code = HTTP_OK if body.get("ready") else HTTP_SERVICE_UNAVAILABLE
-    return code, body
+    return _readiness_code(body), body
 
 
 def healthz(service: HealthService) -> tuple[int, dict[str, Any]]:
     """Detailed operator health report."""
     body = service.full_report()
-    code = HTTP_OK if body.get("ready") else HTTP_SERVICE_UNAVAILABLE
-    return code, body
+    return _readiness_code(body), body
 
 
 def is_serving(service: HealthService) -> bool:
-    """Convenience predicate used by the CLI."""
-    return service.readiness().get("status") in (HEALTH_HEALTHY, "degraded")
+    """True only when readiness is explicitly true and status is safe to serve."""
+    body = service.readiness()
+    return (
+        body.get("ready") is True
+        and body.get("status") in (HEALTH_HEALTHY, "degraded")
+    )
 
 
 ROUTES: dict[str, str] = {

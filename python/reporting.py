@@ -661,7 +661,7 @@ class ReportService:
                     ") ORDER BY e.captured_at", tuple(chunk)):
                 evmap.setdefault(r["finding_id"], []).append(r)
             for r in self._q(
-                    "SELECT t.id, t.status, t.priority, t.owner_type, "
+                    "SELECT t.finding_id, t.id, t.status, t.priority, t.owner_type, "
                     "t.owner_id, t.due_at, t.verification_status, "
                     "t.verification_attempts, t.resolved_at, "
                     "t.updated_at, t.created_at "
@@ -1312,7 +1312,7 @@ class ReportService:
         return raw
 
     def export(self, report_id: str, fmt: str, *,
-               out_path: str = "") -> bytes:
+               out_path: str = "", actor: str = "cli") -> bytes:
         """Export a stored report. `out_path` optional; when given it must
         be a safe filename under an existing directory (no traversal, no
         absolute paths, no control characters)."""
@@ -1330,7 +1330,7 @@ class ReportService:
         self.svc.audit("export.generated", object_type="report",
                        object_id=report_id, org_id=run["org_id"],
                        project_id=run["project_id"],
-                       actor="cli",
+                       actor=actor,
                        metadata={"format": fmt, "size": len(raw)})
         metrics.inc("reports_exported")
         return raw

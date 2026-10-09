@@ -65,29 +65,23 @@ follow-up audit found it was missing 34 existing module tests because duplicate
 count as a complete module-suite baseline. Never weaken assertions to make a
 test pass; fix the code or report the failure.
 
-Current exact results:
+## Current exact results — 2026-10-03
 
-* `python3 -m unittest discover -s tests -p 'test_*.py' -v` — **1133 tests,
-  OK** (394.755s). This discovers the 17 `test_*.py` modules.
-* `python3 tests/run_tests.py` — **1181 tests, OK** (436.566s): the same 1133
-  module tests plus 48 runner-local integration tests in `run_tests.py`. The
-  existing suite logged 46 `ResourceWarning` instances for unclosed resources;
-  they did not fail tests and remain a hygiene backlog.
+* `python3 -m compileall -q api core config interfaces services python tests` —
+  passed.
+* `python3 tests/run_tests.py` — **1,279 tests ran; 0 failures, 0 errors** in
+  498.504 seconds. The suite emits some non-fatal `ResourceWarning`s for
+  existing test/legacy resources.
+* Targeted test groups passed: API resources (13), product integrations (8),
+  dashboard/security (106), cloud adapters (8), crypto (6), database
+  migrations (5), and identity refresh (5).
+* `cd web && npm ci --no-audit --no-fund` succeeded; `npm run typecheck`,
+  `npm run lint`, `npm test` (**6 tests passed**), and `npm run build` passed.
+* `cd web && npm audit --audit-level=high` reported **0 vulnerabilities**.
 
-The new foundation modules contribute 192 tests: `test_foundation_runtime.py`
-33, `test_configuration.py` 36, `test_engine_registry.py` 38,
-`test_schemas.py` 46, `test_security_baseline.py` 39. Thus 941 existing module
-tests + 192 new module tests = 1133 discovered; + 48 runner-local tests = 1181.
-
-### `run_tests.py` is an explicit list — add new modules to it
-
-The runner still has a hand-written list of imported test modules, so a new
-module must be added there as well as being discoverable by unittest. PART 01
-initially missed five new modules; after wiring them in, a second audit found
-and fixed the duplicate-class shadowing described above. Always confirm both
-totals and reconcile them; do not infer success from a focused run alone.
-
-```bash
-python3 -m unittest discover -s tests -p 'test_*.py' -v  # 1133 module tests
-python3 tests/run_tests.py                                # 1181 incl. runner-local tests
-```
+The custom runner loads modules independently to prevent star-import name
+collisions. Its explicit list includes the API, cloud-adapter, crypto,
+database-migration, identity-refresh, and integration test modules; add any
+future module to both the imports and the `load_tests` list. No live cloud or
+external ticketing provider call was made, and visual browser verification was
+not performed.

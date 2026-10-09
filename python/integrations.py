@@ -564,6 +564,22 @@ class _Base:
                 "not a Phase-13 connector connection (no connector_kind)")
         return row
 
+    def catalog(self) -> dict:
+        """Return the canonical closed connector and capability vocabulary."""
+        return {
+            "connector_kinds": list(models.INTEGRATION_CONNECTOR_KINDS),
+            "auth_modes": list(models.INTEGRATION_AUTH_MODES),
+            "health_states": list(models.INTEGRATION_HEALTH_STATES),
+            "capabilities": {
+                kind: list(CONNECTOR_CAPABILITIES.get(kind, ()))
+                for kind in models.INTEGRATION_CONNECTOR_KINDS
+            },
+            "default_adapters": {
+                kind: DEFAULT_ADAPTER_BY_KIND.get(kind, "")
+                for kind in models.INTEGRATION_CONNECTOR_KINDS
+            },
+        }
+
     def _public(self, row: dict) -> dict:
         """Serialization for API/CLI/dashboard: closed vocabularies only,
         config parsed + redacted, capability boundary always visible.
@@ -864,6 +880,8 @@ class ConnectionService(_Base):
         if auth_mode == "mtls_reference":
             issues.append("mtls_not_implemented")
         credential_ref = str(row.get("credential_ref") or "")
+        if auth_mode in ("bearer_token", "hmac", "api_key") and not credential_ref:
+            issues.append("credential_reference_required")
         credential_reference_active = (
             self._credential_ok(row) if credential_ref else None)
         if credential_ref and not credential_reference_active:
@@ -1151,8 +1169,13 @@ class ConnectionService(_Base):
         """Bounded configuration completeness check (no network)."""
         if row["status"] != "enabled":
             return False
-        if str(row.get("auth_mode") or "") not in \
-                models.INTEGRATION_AUTH_MODES:
+        auth_mode = str(row.get("auth_mode") or "")
+        if auth_mode not in models.INTEGRATION_AUTH_MODES:
+            return False
+        if auth_mode == "mtls_reference":
+            return False
+        credential_ref = str(row.get("credential_ref") or "")
+        if auth_mode in ("bearer_token", "hmac", "api_key") and not credential_ref:
             return False
         endpoint = str(row.get("endpoint_url") or "")
         if endpoint:

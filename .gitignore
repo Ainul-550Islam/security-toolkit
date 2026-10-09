@@ -27,6 +27,7 @@ ENV/
 *.pem
 *.key
 !tests/fixtures/*.key
+!tests/fixtures/*.crt
 *.p12
 *.pfx
 *.jks

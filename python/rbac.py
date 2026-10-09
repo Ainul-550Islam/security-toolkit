@@ -54,7 +54,7 @@ PERMISSIONS = frozenset({
     "alert.read", "alert.update", "alert.suppress",
     "remediation.read", "remediation.update", "remediation.assign",
     "remediation.verify",
-    "notification.read", "notification.retry",
+    "notification.read", "notification.retry", "notification.configure",
     # Phase 7 — DevSecOps security gates & CI runs
     "devsecops.read", "devsecops.create", "devsecops.update",
     "devsecops.run", "devsecops.export", "devsecops.delete",
@@ -183,6 +183,7 @@ _SECURITY_MANAGER = (_ANALYST | {
     # Phase 5 sensitive controls (never implicitly granted below this level)
     "monitoring.delete", "alert.suppress",
     "remediation.assign", "remediation.verify", "notification.retry",
+    "notification.configure",
     # Phase 8: identity security operations (MFA resets, SSO config, SCIM
     # provisioning use the existing RBAC roles — no second permission system)
     "identity.update",

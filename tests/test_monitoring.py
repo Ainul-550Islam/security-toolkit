@@ -7,11 +7,13 @@
 # ============================================================================
 from __future__ import annotations
 
+import base64
 import os
 import shutil
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -39,6 +41,7 @@ from remedy import RemediationService
 from authz import AuthorizationService
 
 PW = "S3cure!Passw0rd"
+_TEST_ENCRYPTION_KEY = base64.b64encode(b"T" * 32).decode("ascii")
 INGEST = {
     "tool": "secuaudit", "target": "https://demo.example.com/",
     "assets": [{"type": "url", "value": "https://demo.example.com/"}],
@@ -56,6 +59,12 @@ class Phase5Base(unittest.TestCase):
     """One project + all Phase-5 services on a fresh temp database."""
 
     def setUp(self):
+        self._crypto_environment = patch.dict(os.environ, {
+            "SECURITY_TOOLKIT_ENCRYPTION_ACTIVE_KEY_ID": "test-key",
+            "SECURITY_TOOLKIT_ENCRYPTION_KEY": _TEST_ENCRYPTION_KEY,
+        })
+        self._crypto_environment.start()
+        self.addCleanup(self._crypto_environment.stop)
         self.tmp = tempfile.mkdtemp(prefix="p5_")
         self.svc = _service(self.tmp)
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -619,6 +628,38 @@ class TestNotifications(Phase5Base):
         self.assertNotIn("s3cret-key-123456", str(
             self.notify.settings_view(self.proj.id)))
 
+    def test_legacy_webhook_ciphertext_migrates_to_authenticated_encryption(self):
+        legacy_key_path = os.path.join(
+            self.tmp, ".secutoolkit_webhook.key"
+        )
+        with open(legacy_key_path, "wb") as key_file:
+            key_file.write(b"L" * 32)
+        os.chmod(legacy_key_path, 0o600)
+        self.notify.settings_set(
+            self.proj.id,
+            webhook_enabled=True,
+            webhook_url="https://hooks.example.com/h",
+        )
+        legacy_ciphertext = "cf81c013bb2f6cb2d8280eb23df533fbdb7f5309259b3b0fc6"
+        self.svc.db.execute(
+            "UPDATE notification_settings SET webhook_secret=? WHERE project_id=?",
+            (legacy_ciphertext, self.proj.id),
+        )
+
+        internal = self.notify.settings_get(self.proj.id)
+        self.assertEqual(internal["webhook_secret"], "legacy-webhook-secret-123")
+        stored = self.svc.db.query(
+            "SELECT webhook_secret FROM notification_settings WHERE project_id=?",
+            (self.proj.id,),
+        )[0]["webhook_secret"]
+        self.assertTrue(stored.startswith("st-aesgcm:v1:"))
+        self.assertNotEqual(stored, legacy_ciphertext)
+        actions = {
+            event.action
+            for event in self.svc.audit_list_org(self.org.id)
+        }
+        self.assertIn("notification.secret.migrated", actions)
+
     def test_keep_secret_preserves_existing(self):
         self.notify.settings_set(self.proj.id, webhook_enabled=True,
                                  webhook_url="https://hooks.example.com/h",
@@ -794,8 +835,9 @@ class TestNotifications(Phase5Base):
         # wrong secret / wrong body / wrong signature all fail
         self.assertFalse(verify_signature("other", ts, body, sig))
         self.assertFalse(verify_signature("k-123456", ts, b'{"a":2}', sig))
-        self.assertFalse(verify_signature("k-123456", ts, body,
-                                          sig[:-2] + "00"))
+        wrong_sig = ("0" if sig[0] != "0" else "1") + sig[1:]
+        self.assertNotEqual(wrong_sig, sig)
+        self.assertFalse(verify_signature("k-123456", ts, body, wrong_sig))
         self.assertFalse(verify_signature("k-123456", ts, body, "not-hex"))
         self.assertFalse(verify_signature("k-123456", "bad-ts", body, sig))
         # malformed / foreign timestamps fail

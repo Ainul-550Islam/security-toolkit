@@ -9,5 +9,5 @@ mypy>=1.8,<2.0
 # Linting, import hygiene and flake8-bandit security rules (see [tool.ruff]).
 ruff>=0.4,<1.0
 
-# NOTE: the test suite itself requires nothing beyond the standard library --
-# it runs under `python3 -m unittest` and `python3 tests/run_tests.py`.
+# The test harness uses the standard library, and tests covering AEAD require
+# the runtime packages from requirements.txt to be installed first.
